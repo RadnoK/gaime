@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "dev": "node scripts/game.mjs dev",
-    "build": "node scripts/game.mjs build",
+    "build": "npm run build --workspaces --if-present",
     "host": "node scripts/game.mjs host",
     "smoke": "node scripts/game.mjs smoke",
     "load": "node scripts/game.mjs load",
@@ -21,7 +21,8 @@
     "test": "vitest run",
     "new-game": "node packages/host/bin/gaime.mjs new",
     "gaime": "node packages/host/bin/gaime.mjs",
-    "deploy": "git push origin main"
+    "deploy": "git push origin main",
+    "build:game": "node scripts/game.mjs build"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

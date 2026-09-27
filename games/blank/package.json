@@ -1,0 +1,21 @@
+{
+  "name": "blank",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Blank — the smallest complete gaime game (move, collect, score). Template for new games.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --app",
+    "start": "node dist/server/server.mjs",
+    "check": "tsc --noEmit -p .",
+    "test": "vitest run --root ../.. games/blank",
+    "host": "gaime host",
+    "smoke": "gaime smoke",
+    "load": "gaime load --input '{\"mx\":\"$rand\",\"mz\":\"$rand\"}'"
+  },
+  "dependencies": {
+    "@gaime/core": "*",
+    "@gaime/host": "*"
+  }
+}

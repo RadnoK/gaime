@@ -1,0 +1,4 @@
+/* Game-specific styles. The HUD comes from @gaime/core/ui; theme it with the --g-* variables. */
+html, body, #app { margin: 0; height: 100%; overflow: hidden; background: var(--g-bg); color: var(--g-text); font-family: var(--g-font); }
+#app { position: relative; }
+.stage { position: absolute; inset: 0; touch-action: none; }

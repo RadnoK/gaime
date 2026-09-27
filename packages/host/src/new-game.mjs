@@ -11,11 +11,22 @@ function files(dir) {
   });
 }
 
-export function newGame({ root, name, title, from = 'starter' }) {
+/** Games that can be copied, with the first line of their package description. */
+export function templates(root) {
+  const dir = join(root, 'games');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter(name => existsSync(join(dir, name, 'package.json'))).map(name => {
+    let description = '';
+    try { description = JSON.parse(readFileSync(join(dir, name, 'package.json'), 'utf8')).description ?? ''; } catch {}
+    return { name, description };
+  });
+}
+
+export function newGame({ root, name, title, from = 'blank' }) {
   if (!/^[a-z][a-z0-9-]{1,40}$/.test(name)) throw new Error('Game name: lowercase letters, digits and dashes, e.g. "super-popes".');
   const source = join(root, 'games', from);
   const target = join(root, 'games', name);
-  if (!existsSync(source)) throw new Error(`No template games/${from}.`);
+  if (!existsSync(source)) throw new Error(`No template games/${from}. Available: ${templates(root).map(t => t.name).join(', ')}`);
   if (existsSync(target)) throw new Error(`games/${name} already exists.`);
   cpSync(source, target, { recursive: true, filter: path => !SKIP.has(path.split(/[\\/]/).pop()) });
   const display = title || name.split('-').map(part => part[0].toUpperCase() + part.slice(1)).join(' ');
@@ -26,7 +37,7 @@ export function newGame({ root, name, title, from = 'starter' }) {
     const before = text;
     text = text.replaceAll(`'${from}'`, `'${name}'`).replaceAll(`"name": "${from}"`, `"name": "${name}"`).replaceAll(`games/${from}`, `games/${name}`);
     // Only visible title text (<title>, headings), never identifiers such as `hurtCrystal`.
-    if (oldTitle && /\.(html|ts)$/.test(file)) text = text.replaceAll(`>${oldTitle}<`, `>${display}<`);
+    if (oldTitle && /\.(html|ts)$/.test(file)) text = text.replaceAll(`>${oldTitle}<`, `>${display}<`).replaceAll(`title: '${oldTitle}'`, `title: '${display.replace(/'/g, "\\'")}'`);
     if (text !== before) writeFileSync(file, text);
   }
   return { path: relative(root, target), title: display };

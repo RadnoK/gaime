@@ -1,0 +1,21 @@
+{
+  "name": "duel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Duel — turn-based 1v1 artillery with destructible terrain, wind and weapons as modules.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --app",
+    "start": "node dist/server/server.mjs",
+    "check": "tsc --noEmit -p .",
+    "test": "vitest run --root ../.. games/duel",
+    "host": "gaime host",
+    "smoke": "gaime smoke",
+    "load": "gaime load --bots 2 --input '{\"move\":\"$rand\",\"aim\":\"$int(0,180)\"}'"
+  },
+  "dependencies": {
+    "@gaime/core": "*",
+    "@gaime/host": "*"
+  }
+}

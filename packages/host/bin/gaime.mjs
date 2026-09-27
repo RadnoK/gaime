@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { resolveConfig, sendControl, paths, Supervisor } from '../src/supervisor.mjs';
 import { smoke } from '../src/smoke.mjs';
 import { load } from '../src/load.mjs';
-import { newGame } from '../src/new-game.mjs';
+import { newGame, templates } from '../src/new-game.mjs';
 import { git } from '../src/git.mjs';
 import { alive, readJson, short } from '../src/util.mjs';
 
@@ -32,7 +32,8 @@ Tests
                                load and latency test (bots, RTT p50/p99, tick cost)
 
 Creating
-  gaime new <name> [--title "Title"] [--from starter]   new game in games/<name>
+  gaime new <name> [--title "Title"] [--from blank|starter|duel|…]   new game in games/<name>
+  gaime new --list             templates you can start from
 
 Environment: GAIME_MODE=live|release, GAIME_PORT, GAIME_URL, GAIME_BRANCH, GAIME_REMOTE, GAIME_POLL_MS,
 GAIME_GATES (e.g. "check,test"), GAIME_DATA_DIR, GAIME_STATE_DIR, GAIME_PUBLIC_DIR, GAIME_PUBLIC_URL,
@@ -152,11 +153,15 @@ try {
       break;
     }
     case 'new': {
-      const name = positional()[0];
-      if (!name) throw new Error('Usage: gaime new <name> [--title "Title"] [--from starter]');
       let root = process.cwd();
       try { root = git(process.cwd(), 'rev-parse', '--show-toplevel'); } catch {}
-      const result = newGame({ root, name, title: flag('title'), from: flag('from', 'starter') });
+      const name = positional()[0];
+      if (!name || args.includes('--list')) {
+        console.log('Templates (gaime new <name> --from <template>):');
+        for (const template of templates(root)) console.log(`  ${template.name.padEnd(12)} ${template.description}`);
+        if (!name) break;
+      }
+      const result = newGame({ root, name, title: flag('title'), from: flag('from', 'blank') });
       console.log(`Created ${result.path} ("${result.title}").\n\nNext:\n  npm install\n  npm run dev -- ${name}\n\nThen: git add ${result.path} package-lock.json && git commit && git push — and set up hosting (docs/DEPLOYMENT.md).`);
       break;
     }
