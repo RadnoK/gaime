@@ -1,3 +1,5 @@
+// ui.css first, so the game's --g-* overrides in style.css win.
+import '@gaime/core/ui';
 import './style.css';
 import { Controls, GameClient, keep, Scope, TouchControls, WASD, watchVersion } from '@gaime/core/client';
 import { SoundBank, tones } from '@gaime/core/audio';

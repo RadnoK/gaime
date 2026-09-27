@@ -52,6 +52,8 @@ export function nextTurn(turns: TurnState, time: number, seconds: number, canPla
     turns.frozen = null;
     return turns.order[index];
   }
+  // Nobody can play: the current turn goes on, never stuck frozen.
+  resumeTurn(turns, time);
   return undefined;
 }
 
@@ -69,9 +71,11 @@ export function resumeTurn(turns: TurnState, time: number, atLeast = 0) {
 
 /** Keep the order in sync with who is still in the game (players leaving mid-round). */
 export function syncTurns(turns: TurnState, ids: string[]) {
-  const current = currentTurn(turns);
-  turns.order = turns.order.filter(id => ids.includes(id));
+  const old = turns.order;
+  turns.order = old.filter(id => ids.includes(id));
   for (const id of ids) if (!turns.order.includes(id)) turns.order.push(id);
-  const index = current ? turns.order.indexOf(current) : -1;
-  turns.index = index >= 0 ? index : Math.min(turns.index, Math.max(0, turns.order.length - 1));
+  // The current id, or when it left, the next one after it in the old order (wrapping around).
+  let index = -1;
+  for (let step = 0; step < old.length && index < 0; step++) index = turns.order.indexOf(old[(turns.index + step) % old.length]);
+  turns.index = Math.max(0, index);
 }

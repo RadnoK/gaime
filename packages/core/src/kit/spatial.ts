@@ -20,8 +20,8 @@ export class SpatialHash<T extends Vec2> {
   }
 
   private key(cx: number, cz: number) {
-    // Cantor-free packing: fine for |coordinates| < ~1e6 cells.
-    return (cx + 0x8000) * 0x10000 + (cz + 0x8000);
+    // Exact integer packing: unique while |cz| < 2^25 and |cx| < 2^27 cells.
+    return cx * 0x4000000 + cz;
   }
 
   clear() { this.cells.clear(); }

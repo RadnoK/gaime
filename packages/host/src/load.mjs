@@ -90,7 +90,8 @@ export async function load({ url, bots = 10, seconds = 20, rate = 20, input, cha
     errors: stats.errors.slice(0, 10),
   };
   console.log(JSON.stringify(report, null, 2));
-  const budget = 1000 / 30;
+  const tickRate = stats.server.find(s => s.tickRate > 0)?.tickRate ?? 30;
+  const budget = 1000 / tickRate;
   if (report.server.tickMsMax > budget) console.log(`⚠ Server tick exceeded its ${round(budget)} ms budget — the simulation cannot keep up (consider workers or a lower publish rate).`);
   if (stats.failed || stats.dropped) process.exitCode = 1;
   return report;

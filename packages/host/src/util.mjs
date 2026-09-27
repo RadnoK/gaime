@@ -42,3 +42,9 @@ export function run(command, args, { cwd, env = process.env, timeout = 300_000, 
 }
 
 export const short = sha => (sha ? sha.slice(0, 8) : '—');
+
+/** Value of `--name <value>`; the last occurrence wins, so `npm run x -- --flag` overrides a preset in the script. */
+export function flagValue(args, name, fallback) {
+  const index = args.lastIndexOf(`--${name}`);
+  return index >= 0 && args[index + 1] !== undefined ? args[index + 1] : fallback;
+}

@@ -30,6 +30,25 @@ A monorepo framework for multiplayer browser games developed by several people a
 - Before pushing: `npm run check` and `npm test` (the server runs the typecheck as a gate anyway — an invalid commit will not go live, and you block the queue until the next push).
 - After a push the server: fetches the commit (≤ 3 s) → typecheck → sync → hot reload → confirmation via `/health`. State: `cd games/<game> && npx gaime status` (locally) or on the server (docs/DEPLOYMENT.md).
 
+## Skills (step-by-step playbooks)
+
+`.claude/skills/` (also `.agents/skills/`) — load the matching one before you start ([docs/SKILLS.md](docs/SKILLS.md)):
+
+| Task | Skill |
+| --- | --- |
+| new game from a template | `gaime-new-game` |
+| new content in an existing game (enemy, weapon, ability, pickup…) | `gaime-feature` |
+| a new kind of content / extension point | `gaime-module-kind` |
+| core rules, world state, rounds, scoring, saves | `gaime-mechanic` |
+| HUD, scene, models, effects, sound, controls | `gaime-client` |
+| AI players, bot-vs-bot tests | `gaime-bot` |
+| heavy computation | `gaime-worker` |
+| sync, lag, bandwidth, load | `gaime-networking` |
+| tests and pre-push checks | `gaime-test` |
+| something is broken | `gaime-debug` |
+| hosting, deploys, rollback | `gaime-deploy` |
+| changing `packages/core` or `packages/host` | `gaime-engine` |
+
 ## Commands
 
 ```sh
@@ -37,24 +56,28 @@ npm install
 npm run dev [-- <game>]           # http://localhost:5173, client and server HMR
 npm run check                     # typecheck everything
 npm test                          # vitest (framework + games)
+npm run build                     # production build of every game
 npm run smoke [-- <game>]         # E2E with real clients against a running dev server
 npm run load [-- <game>]          # bots: RTT, tick/publish cost
-npm run new-game -- <name>        # new game from the games/starter template
+npm run new-game -- <name> [--from blank|starter|duel] [--title "Title"]   # default template: blank
 npx gaime help                    # every CLI command (inside a game directory)
 ```
 
-Testing logic without the network: `testContext(world)` from `@gaime/core/server` gives a full `GameContext` (collects notices and events, runs jobs).
+Testing logic without the network: `testContext(world, { random, command })` from `@gaime/core/server` gives a full `GameContext` (collects notices and events, runs jobs). Bot vs bot rounds make good end-to-end rule tests.
 
 ## Map
 
-- `packages/core/src/shared/` — base types (`BaseWorld`, `BasePlayer`, `Visual`), delta sync (`net.ts`), module registry, protocol, math.
-- `packages/core/src/server/` — `defineGame`, `createGameServer`, the room (`room.ts`), chat, checkpoints, workers, metrics, `testContext`.
-- `packages/core/src/client/` — `GameClient`, `watchVersion`, `Keyboard`/`Pointer`, `ServerClock`/`Interpolator`.
-- `packages/core/src/three/` — `createStage`, `ModelLibrary`, `EntityLayer`, labels.
-- `packages/core/src/vite/` — the `gaime()` plugin (Colyseus inside Vite, HMR, workers in the build).
+- `packages/core/src/shared/` (`@gaime/core`) — base types (`BaseWorld`, `BasePlayer`, `Visual`), delta sync (`net.ts`), module registry, protocol, math.
+- `packages/core/src/server/` (`/server`) — `defineGame`, `createGameServer`, the room (`room.ts`: sessions, bots, per-player views, admin), chat, checkpoints, workers, metrics, `testContext`.
+- `packages/core/src/kit/` (`/kit`) — pure gameplay helpers: collision, `SpatialHash`, projectiles, cooldowns/timers/status effects, match lifecycle, turns, inventory, random, teams, effects, movement. Use these before writing your own.
+- `packages/core/src/client/` (`/client`) — `GameClient`, `Controls`/`TouchControls` (keyboard, mouse, gamepad, touch), `Scope`/`keep` for HMR, `ServerClock`/`Interpolator`, `watchVersion`.
+- `packages/core/src/ui/` (`/ui`) — `GameUi` (lobby, status, menu, roster, chat, toasts, banner, dialogs, F3 stats), DOM helpers, themable CSS.
+- `packages/core/src/three/` (`/three`) — `createStage`, `CameraRig`, `ModelLibrary` (+ glTF), `EntityLayer`, `EffectsLayer`, bars, labels.
+- `packages/core/src/audio/` (`/audio`) — `SoundBank`, synthesized `tones`.
+- `packages/core/src/vite/` (`/vite`) — the `gaime()` plugin (Colyseus inside Vite, HMR, workers in the build).
 - `packages/host/` — the `gaime` CLI and the deploy supervisor.
-- `games/<game>/` — a game: `src/shared` (types, rules shared with the client), `src/server` (simulation, registry), `src/client` (rendering, HUD), `src/features/*`, `src/workers/*`, `tests/`.
-- Docs: [ARCHITECTURE](docs/ARCHITECTURE.md), [PROTOCOL](docs/PROTOCOL.md), [SERVER](docs/SERVER.md), [DEPLOYMENT](docs/DEPLOYMENT.md), [NEW_GAME](docs/NEW_GAME.md).
+- `games/<game>/` — a game: `src/shared` (types, rules shared with the client), `src/server` (simulation, registry), `src/client` (rendering, HUD), `src/features/*`, `src/workers/*`, `tests/`. Templates: `blank` (minimal), `starter` (Crystal, co-op defense), `duel` (turn-based artillery) — [docs/TEMPLATES.md](docs/TEMPLATES.md).
+- Docs: [index](docs/README.md) — [GETTING_STARTED](docs/GETTING_STARTED.md), [TUTORIAL](docs/TUTORIAL.md), [ARCHITECTURE](docs/ARCHITECTURE.md), [SERVER](docs/SERVER.md), [CLIENT](docs/CLIENT.md), [KIT](docs/KIT.md), [MODULES](docs/MODULES.md), [COOKBOOK](docs/COOKBOOK.md), [PROTOCOL](docs/PROTOCOL.md), [TESTING](docs/TESTING.md), [DEPLOYMENT](docs/DEPLOYMENT.md), [TROUBLESHOOTING](docs/TROUBLESHOOTING.md), [reference/CONFIG](docs/reference/CONFIG.md), [reference/CLI](docs/reference/CLI.md).
 
 ## Don't
 

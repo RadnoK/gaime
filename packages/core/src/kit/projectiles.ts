@@ -56,7 +56,10 @@ export interface StepProjectilesOptions<T> {
   gravity?: Vec2;
   /** Extra per-projectile acceleration (e.g. wind susceptibility). */
   accelerate?(projectile: Projectile): Vec2 | undefined;
-  /** What a projectile can hit this step (return undefined for nothing). */
+  /**
+   * What a projectile can hit this step (return undefined for nothing). A target with an `id`
+   * is hit at most once per projectile: piercing shots skip it afterwards (see `wasHit`).
+   */
   hit?(projectile: Projectile): T | undefined;
   /** Solid geometry: return true when the point is inside the ground/wall. */
   solid?(point: Vec2): boolean;
@@ -66,6 +69,17 @@ export interface StepProjectilesOptions<T> {
   onExpire?(projectile: Projectile): void;
   /** Sub-steps per tick so fast projectiles cannot tunnel through thin things. Default: automatic. */
   substeps?: number;
+}
+
+const HIT = 'gaime-hit:';
+const targetId = (target: unknown) => {
+  const id = (target as { id?: unknown } | undefined)?.id;
+  return typeof id === 'string' || typeof id === 'number' ? String(id) : undefined;
+};
+
+/** True when a kept-alive (piercing) projectile already hit the target with this id. */
+export function wasHit(projectile: Projectile, id: string | number) {
+  return projectile.data[HIT + id] === true;
 }
 
 /** Moves every projectile in `projectiles`, resolves hits, removes finished ones. */
@@ -87,11 +101,14 @@ export function stepProjectiles<T>(projectiles: Record<string, Projectile>, opti
       projectile.x += projectile.vx * dt;
       projectile.z += projectile.vz * dt;
       const point = { x: projectile.x, z: projectile.z };
-      const target = options.hit?.(projectile);
+      let target = options.hit?.(projectile);
+      const id = targetId(target);
+      if (id !== undefined && wasHit(projectile, id)) target = undefined;
       const ground = !target && options.solid?.(point);
       if (!target && !ground) continue;
       const keep = options.onImpact?.(projectile, target, point) === true;
       if (!keep) { delete projectiles[projectile.id]; break; }
+      if (target && id !== undefined) projectile.data[HIT + id] = true;
     }
   }
 }

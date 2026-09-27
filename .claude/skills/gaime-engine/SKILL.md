@@ -46,3 +46,7 @@ For supervisor changes, test with a throwaway remote: clone to `/tmp`, create a 
 - Close codes 4000–4010 belong to Colyseus; gaime uses 4102/4103.
 - Vite HMR boundaries need the literal `import.meta.hot.accept()` in the module.
 - `import.meta.env.PROD` differs between dev (Vite), production builds and vitest — test all three for server code that depends on it.
+
+## Reference
+
+`docs/ARCHITECTURE.md`, `docs/PROTOCOL.md`, `docs/SERVER.md`, `docs/CLIENT.md`, `docs/KIT.md`, `docs/reference/CONFIG.md`, `docs/reference/CLI.md` — keep them in sync with your change.

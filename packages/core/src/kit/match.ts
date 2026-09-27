@@ -105,5 +105,6 @@ export function toLobby(match: MatchState) {
 
 /** Seconds left in the countdown or round (0 when not applicable). */
 export function matchTimeLeft(match: MatchState, time: number) {
-  return match.until ? Math.max(0, match.until - time) : 0;
+  const timed = match.phase === 'countdown' || (match.phase === 'playing' && match.until > 0);
+  return timed ? Math.max(0, match.until - time) : 0;
 }

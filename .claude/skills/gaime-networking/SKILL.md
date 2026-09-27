@@ -63,3 +63,7 @@ Budgets: tick max < 33 ms (30 Hz), publish ms small, event loop p99 < 20 ms, pat
 - Using commands for continuous input (60 commands/s) — hits the message limit; use `input`.
 - Storing per-client UI state in the world (menus open, hover) — keep it on the client.
 - Client code with `?lag` disabled only — always test once with lag.
+
+## Reference
+
+`docs/PROTOCOL.md`, `docs/SERVER.md#per-player-views`, `docs/TESTING.md#load-and-latency-gaime-load`, `docs/reference/CONFIG.md` (NetworkConfig, tick and publish rates).

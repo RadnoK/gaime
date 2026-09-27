@@ -40,12 +40,22 @@ export function resolveConfig(cwd = process.cwd(), env = process.env) {
     publicDir: env.GAIME_PUBLIC_DIR || join(stateDir, 'public'),
     remote: env.GAIME_REMOTE || 'origin',
     branch: env.GAIME_BRANCH || 'main',
-    pollMs: Number(env.GAIME_POLL_MS || 3000),
-    startTimeout: Number(env.GAIME_START_TIMEOUT_MS || 120_000),
-    hmrTimeout: Number(env.GAIME_HMR_TIMEOUT_MS || 30_000),
-    soakMs: Number(env.GAIME_SOAK_MS || 2500),
+    pollMs: envNumber(env, 'GAIME_POLL_MS', 3000, 100),
+    startTimeout: envNumber(env, 'GAIME_START_TIMEOUT_MS', 120_000, 1000),
+    hmrTimeout: envNumber(env, 'GAIME_HMR_TIMEOUT_MS', 30_000, 1000),
+    soakMs: envNumber(env, 'GAIME_SOAK_MS', 2500),
     serverEntry: env.GAIME_SERVER_ENTRY || 'src/server/index.ts',
   };
+}
+
+/** A numeric setting; a typo (not a number, below `min`) falls back to the default with a warning. */
+export function envNumber(env, name, fallback, min = 0) {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (Number.isFinite(value) && value >= min) return value;
+  log(`${name}=${JSON.stringify(raw)} is not a number ≥ ${min} — using ${fallback}.`);
+  return fallback;
 }
 
 export const paths = config => ({
@@ -62,10 +72,13 @@ export const paths = config => ({
   checkpoint: join(config.dataDir, 'checkpoint.json'),
 });
 
+/** Queue a command for the running supervisor; returns its id (acknowledged as `state.control.id`). */
 export function sendControl(config, command) {
   const p = paths(config);
   mkdirSync(p.controls, { recursive: true });
-  writeAtomic(join(p.controls, `${Date.now()}-${randomUUID()}.json`), { command });
+  const id = `${Date.now()}-${randomUUID()}`;
+  writeAtomic(join(p.controls, `${id}.json`), { command });
+  return id;
 }
 
 export class Supervisor {
@@ -154,6 +167,7 @@ export class Supervisor {
       const path = join(this.p.controls, file);
       const { command } = readJson(path, {});
       rmSync(path, { force: true });
+      const control = { id: file.replace(/\.json$/, ''), command, at: new Date().toISOString() };
       try {
         if (command === 'pause') { this.save({ paused: true }); log('Automatic updates paused.'); }
         if (command === 'resume') { this.save({ paused: false, error: null }); log('Automatic updates resumed.'); }
@@ -165,7 +179,8 @@ export class Supervisor {
           this.save({ status: 'running', error: null });
           log('Rolled back to the previous version. Updates are paused — after a fix: gaime resume');
         }
-      } catch (error) { log(`${command}: ${error.message}`); this.save({ error: error.message }); }
+        this.save({ control: { ...control, ok: true } });
+      } catch (error) { log(`${command}: ${error.message}`); this.save({ error: error.message, control: { ...control, ok: false, error: error.message } }); }
     }
   }
 
@@ -243,7 +258,7 @@ export class Supervisor {
   spawnChild(cwd, args, env) {
     log(`Start: npm ${args.join(' ')} (${relative(this.c.stateDir, cwd) || cwd})`);
     const child = spawn('npm', args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    child.on('error', error => log(`Proces gry: ${error.message}`));
+    child.on('error', error => log(`Game process: ${error.message}`));
     // Pass the output through, and notice a failed server hot reload right away
     // instead of waiting for the health timeout.
     for (const [stream, out] of [[child.stdout, process.stdout], [child.stderr, process.stderr]]) {
@@ -505,7 +520,8 @@ class LiveMode {
     if (!target) throw new Error('There is no previous version to roll back to.');
     const current = s.state.current?.sha;
     await this.deploy(target, { gates: false, check: false });
-    s.save({ previous: current ? { sha: current } : null, attempted: current ?? s.state.attempted });
+    // Like release mode: no way "back" to the version just rolled away from (no ping-pong).
+    s.save({ previous: null, attempted: current ?? s.state.attempted });
   }
 }
 

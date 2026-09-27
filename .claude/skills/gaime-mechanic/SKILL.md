@@ -68,3 +68,7 @@ Write or extend a test in `games/<game>/tests/` with `testContext(world, { rando
 - `Math.random()` / `Date.now()` in the simulation → untestable, inconsistent; use `ctx.random`, `world.time`.
 - Changing `name` in `defineGame` resets everyone's identity and the save. Don't.
 - A thrown exception in `step` pauses the game for everyone — test before pushing.
+
+## Reference
+
+`docs/SERVER.md` (tick, commands, context, persistence), `docs/KIT.md`, `docs/COOKBOOK.md` (rounds, teams, turns, shops, hidden information, migrations).

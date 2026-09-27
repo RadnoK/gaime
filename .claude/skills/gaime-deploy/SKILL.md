@@ -34,7 +34,7 @@ docker compose exec game node /app/packages/host/bin/gaime.mjs status      # ver
 | `UPDATES PAUSED` | someone ran rollback/pause — after the fix: `gaime resume` |
 | no new history entry | the commit only touched other games (filtered), or fetch fails (deploy key) |
 
-Controls (inside the container: `docker compose exec game node /app/packages/host/bin/gaime.mjs <cmd>`; locally: `npx gaime <cmd>` in the game directory): `rollback` (previous version, pauses updates), `resume`, `pause`, `redeploy` (retry the newest commit), `restart` (restart the game process, keeps the checkpoint).
+Controls (inside the container: `docker compose exec game node /app/packages/host/bin/gaime.mjs <cmd>`; locally: `npx gaime <cmd>` in the game directory): `rollback` (previous version, pauses updates; one step only — a second rollback is refused), `resume`, `pause`, `redeploy` (retry the newest commit), `restart` (restart the game process, keeps the checkpoint). Each waits for the supervisor's acknowledgement and prints `Done: <cmd>.`, `<cmd> failed: …` (exit 1), or `Requested … see gaime status` while a deploy is still running. For scripts: `gaime status --json` prints pure JSON.
 
 ## Put a game online (first time)
 
@@ -68,3 +68,7 @@ Without Docker: `deploy/systemd/gaime@.service` (see docs/DEPLOYMENT.md). On a l
 - Never delete `data/` (saves, admin token).
 - A dependency change (lockfile) means `npm ci` + a restart for everyone instead of a hot reload — batch them.
 - Load tests against the public game disturb real players — ask first.
+
+## Reference
+
+`docs/DEPLOYMENT.md`, `docs/reference/CLI.md` (host, status, rollback, resume, redeploy), `docs/reference/CONFIG.md` (environment variables).

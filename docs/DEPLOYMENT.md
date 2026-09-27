@@ -74,9 +74,10 @@ docker compose exec game node /app/packages/host/bin/gaime.mjs redeploy   # retr
 docker compose exec game node /app/packages/host/bin/gaime.mjs players    # and the other admin commands (docs/SERVER.md)
 ```
 
-- **Rollback** in live mode reverts the code (the world stays — HMR); in release mode it reverts the code **and** the matching checkpoint (progress since that deploy is lost). After a rollback updates stay paused until `resume`; the bad commit does not come back by itself — push a fix or `git revert`.
+- **Rollback** in live mode reverts the code (the world stays — HMR); in release mode it reverts the code **and** the matching checkpoint (progress since that deploy is lost). After a rollback updates stay paused until `resume`; the bad commit does not come back by itself — push a fix or `git revert`. There is only one step back: a second `rollback` is refused until a new version has been deployed. Control commands wait for the supervisor and print `Done`, the failure (exit code 1), or `Requested — … see gaime status` when it is still busy with a deploy.
 - **Supervisor code changes** (`packages/host`) need `docker compose restart game` (the supervisor logs a reminder). Changes to `deploy/docker/*` → run `install.sh` again (it is idempotent) or copy the files by hand and `docker compose up -d`.
 - **Switching modes**: `GAIME_MODE` in `.env` and `docker compose up -d game`.
+- **Other settings**: only variables listed in `compose.yml` reach the container; every optional one (`GAIME_REMOTE`, `GAIME_SOAK_MS`, `GAIME_START_TIMEOUT_MS`, `GAIME_HMR_TIMEOUT_MS`, `GAIME_SERVER_ENTRY`, `GAIME_ALLOWED_HOSTS`, `GAIME_LATENCY_MS`) is listed, commented out, in `deploy/docker/env.example` — empty means the default. `GAIME_PORT` (5173) and `GAIME_PUBLIC_DIR` (`/app/.gaime/<GAME>/public`) are fixed because the health check and the gateway depend on them.
 - Never `git reset` inside `repo/` and never edit `.gaime/` by hand. Do not delete `data/`.
 
 ## A VPS without Docker (systemd)
@@ -96,18 +97,21 @@ Put a reverse proxy with WebSockets in front of it (Caddy: `domain { reverse_pro
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `GAIME_MODE` | `live` | `live` / `release` |
-| `GAIME_PORT` | `5173` | game port (HTTP + WebSocket) |
+| `GAIME_PORT` | `5173` | game port (HTTP + WebSocket); a production build also accepts `PORT` |
 | `GAIME_BRANCH`, `GAIME_REMOTE` | `main`, `origin` | what to follow; without a remote — the local HEAD |
-| `GAIME_POLL_MS` | `3000` | `git fetch` interval |
+| `GAIME_POLL_MS` | `3000` | `git fetch` interval (minimum 100) |
 | `GAIME_GATES` | `auto` | gates before a deploy |
-| `GAIME_DATA_DIR` | `.gaime/<game>/data` | checkpoint and admin token |
+| `GAIME_DATA_DIR` | `.gaime/<game>/data` (under the supervisor; a plain game server: `.gaime/data` in the game directory) | checkpoint and admin token |
 | `GAIME_STATE_DIR` | `.gaime/<game>` | releases, live tree, snapshots, state |
 | `GAIME_PUBLIC_DIR` | `.gaime/<game>/public` | files published for the gateway (release) |
 | `GAIME_PUBLIC_URL` | — | public address (HMR over `wss` behind a proxy, `allowedHosts`) |
 | `GAIME_ALLOWED_HOSTS` | — | extra host names for Vite (Tailscale DNS) |
 | `GAIME_ADMIN_TOKEN` | file in data | admin API token |
 | `GAIME_LATENCY_MS` | — | simulated server round trip (testing) |
-| `GAIME_START_TIMEOUT_MS`, `GAIME_HMR_TIMEOUT_MS`, `GAIME_SOAK_MS` | 120 000 / 30 000 / 2 500 | version confirmation timing |
+| `GAIME_START_TIMEOUT_MS`, `GAIME_HMR_TIMEOUT_MS`, `GAIME_SOAK_MS` | 120 000 / 30 000 / 2 500 | version confirmation timing (timeouts: minimum 1000) |
+| `GAIME_SERVER_ENTRY` | `src/server/index.ts` | server entry the live supervisor touches after a sync |
+
+A numeric setting that is not a number or is below its minimum falls back to the default, with a warning in the supervisor log.
 
 ## Troubleshooting
 

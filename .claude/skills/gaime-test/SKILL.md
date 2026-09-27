@@ -70,3 +70,7 @@ Read `rttMs`, `perBot`, `server.tickMsMax` (< 33), `publishMsMax`, `patchBytesMa
 - Write intermediate state to a file (`writeFileSync('/tmp/x.txt', …)`) inside a test when vitest swallows logs.
 - A phase that lasts one tick (e.g. `ended` followed by an automatic rematch) is easy to miss in a loop — assert on counters (wins, round) instead.
 - `/health` shows the loaded version and the last code error; `world.pause` holds the error message after a simulation exception.
+
+## Reference
+
+`docs/TESTING.md`, `docs/reference/CLI.md` (smoke, load).

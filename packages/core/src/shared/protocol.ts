@@ -3,7 +3,7 @@
  * Full description with examples: docs/PROTOCOL.md.
  *
  * client → server
- *   hello    { protocol }                         ask for a full snapshot (join, reconnect, desync)
+ *   hello    (no payload)                         ask for a full snapshot (join, reconnect, desync)
  *   input    <game input>                         continuous state, throttled, lease ~400 ms
  *   command  { type, ... }                        discrete action; `$`-prefixed types are engine commands
  *   request  { id, name, payload }                RPC; answered with `response`

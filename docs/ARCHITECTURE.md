@@ -24,10 +24,13 @@
 
 | Import | Runs in | Contents |
 | --- | --- | --- |
-| `@gaime/core` | everywhere | `BaseWorld`, `BasePlayer`, `Visual`, delta sync (`projectWorld`/`diffWorld`/`applyWorldPatch`), `InputGate`, `createRegistry`, `baseWorld`, `hydrate`, `pushFeed`, `findPlayer`, math, protocol |
+| `@gaime/core` | everywhere | `BaseWorld`, `BasePlayer`, `Visual`, delta sync (`projectWorld`/`diffWorld`/`applyWorldPatch`), `InputGate`, `createRegistry`, `baseWorld`, `hydrate`, `pushFeed`, `findPlayer`, math (`clamp`, `lerp`, `dist`, `angleTo`, `nearest`, `seeded`…), protocol |
 | `@gaime/core/server` | server | `defineGame`, `createGameServer`, `GameContext`, `workerPool`, `testContext`, checkpoints |
-| `@gaime/core/client` | browser | `GameClient`, `watchVersion`, `Keyboard`, `Pointer`, `ServerClock`, `Interpolator`, `createFeatureModules` |
-| `@gaime/core/three` | browser | `createStage`, `ModelLibrary`, `EntityLayer`, `createLabel`, `pickGround` |
+| `@gaime/core/kit` | everywhere | pure gameplay helpers: collision/raycasts, `SpatialHash`, projectiles, cooldowns/status/timers, match lifecycle, turns, inventory, random, teams, effects, movement ([KIT.md](KIT.md)) |
+| `@gaime/core/client` | browser | `GameClient`, `watchVersion`, `Controls`, `TouchControls`, `Scope`/`keep`, `Keyboard`, `Pointer`, `ServerClock`, `Interpolator`, `createFeatureModules` |
+| `@gaime/core/ui` | browser | `GameUi` (lobby, status, menu, roster, chat, toasts, banner, dialogs, F3 stats), DOM helpers, `ui.css` |
+| `@gaime/core/three` | browser | `createStage`, `CameraRig`, `ModelLibrary` (+ glTF), `EntityLayer`, `EffectsLayer`, bars, labels, `pickGround` |
+| `@gaime/core/audio` | browser | `SoundBank`, `tones` |
 | `@gaime/core/worker` | worker | `defineWorker` |
 | `@gaime/core/vite` | vite.config | the `gaime()` plugin |
 | `@gaime/host` | Node CLI | `gaime` (supervisor, status, rollback, admin, smoke, load, new) |
@@ -56,7 +59,9 @@ The engine (`packages/core/src/server/room.ts`) provides:
 - **One shared room** per game (`/gaime/room` returns its id; no extra rooms appear when it fills up).
 - **Identity**: the browser keeps a random `ticket` (localStorage, separate per `?player=`); the server maps it to a player id (privately, in the checkpoint, never sent to clients). Refresh, server restart, new tab — same character. A new tab takes the character over (the old one gets close code 4103).
 - **`keepPlayers`**: `true` (default) — the character stays in the world while offline; `false` — leaving frees the seat (duels). After a process restart seats wait 60 s.
-- **Game host**: `world.hostId` = the first online player; it moves on when they disconnect.
+- **Game host**: `world.hostId` = the first online human player; it moves on when they disconnect.
+- **Bots**: players driven by `GameDefinition.bot` on the server (`/bot`, `ctx.addBot`), using the same inputs and commands as humans.
+- **Per-player views**: an optional `view(world, playerId)` filters what each client receives (hidden information).
 - **Input lease**: a player's last input holds for 400 ms (the client repeats it every 150 ms); a lost client stops moving.
 - **Error isolation**: an exception in `step` or a hook → `world.pause = { reason: 'error' }`, a message in the feed, `/health` reports the error. The next code load (HMR/restart) resumes the game. An exception in a command → a notice to its author only.
 - **Checkpoint** `<data>/checkpoint.json` every ~2 s (when time moves or something changed), on shutdown and before HMR; written via rename. An unreadable save is never overwritten (`frozen`).
@@ -80,13 +85,13 @@ What HMR cannot carry over: dependency changes (`package.json`/lockfile) and Vit
 ## Data flow in one tick
 
 1. Apply the results of finished `ctx.job`s (workers, asynchronous requests).
-2. `world.time += dt` (unless paused), `game.step(world, inputs, dt, ctx)`.
-3. Every `publishEvery` ticks: `projectWorld` (a copy, rounded, without `hidden`) → one `diffWorld` and one encoding per group of clients sharing a base → `enqueueRaw`. A client with a clogged buffer (>64 KB) is skipped until it drains.
+2. Collect inputs (humans: last input within the lease; bots: `game.bot()`), `world.time += dt` (unless paused), `game.step(world, inputs, dt, ctx)`.
+3. Every `publishEvery` ticks: `projectWorld` (a copy, rounded, without `hidden`) → one `diffWorld` and one encoding per group of clients sharing a base (per client when `view` is set) → `enqueueRaw`. A client with a clogged buffer (>64 KB) is skipped until it drains.
 4. A checkpoint every ~2 s.
 
 ## Tests
 
-- `packages/core/tests` — delta sync, registry, hydrate, workers, a real server with WebSocket clients (smoke, errors, chat, RPC, events, jobs, a corrupt checkpoint).
+- `packages/core/tests` — delta sync, registry, hydrate, kit, workers, a real server with WebSocket clients (smoke, errors, chat, RPC, events, jobs, per-player views, bots, admin API, a corrupt checkpoint).
 - `packages/host/tests` — tree sync, `node_modules` linking, dependency key, commit filter, load templates.
-- `games/*/tests` — game logic on `testContext`.
+- `games/*/tests` — game logic on `testContext`, including bot-vs-bot rounds. See [TESTING.md](TESTING.md).
 - `gaime smoke --hmr` — E2E against a running server including a backend hot reload.

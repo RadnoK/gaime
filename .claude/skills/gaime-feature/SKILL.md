@@ -55,3 +55,7 @@ Add a test to `games/<game>/tests/` for non-trivial logic (see existing tests; `
 - Importing `server/*` from `client.ts` leaks server code into the browser bundle — client modules only import `three`, `@gaime/core/*` and `../../shared/*`.
 - Do not edit other people's modules or central files to "register" yours — discovery is automatic.
 - Do not add npm dependencies for a module (lockfile changes restart the game for everyone).
+
+## Reference
+
+`docs/MODULES.md` (module anatomy, registry, catalog, client models), `docs/KIT.md` (timers, status effects, projectiles, collision), `docs/COOKBOOK.md`.

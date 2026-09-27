@@ -17,9 +17,20 @@ WebSocket via Colyseus (MessagePack). Protocol version: `PROTOCOL_VERSION = 2` (
 | S→C | `notice` | text | private answer / toast |
 | S→C | `removed` | — | you were removed from the game; close code 4102 follows |
 
+## Joining
+
+1. `GET /gaime/room` → `{ roomId }` of the one shared room.
+2. Colyseus `joinById(roomId, options)` with `{ ticket, name, ephemeral? }`:
+   - `ticket` — the browser identity (random, kept in localStorage per game and `?player=` slot); `onAuth` maps it to a player id. Never sent to other clients.
+   - `name` — the lobby nickname (trimmed, ≤ 24 characters, made unique: a taken name becomes `Name 2`, `Name 3`…; a returning player keeps their name if the requested one is taken, with a notice).
+   - `ephemeral: true` — a throwaway player (load-test bots): marked `data['gaime-ephemeral']` and removed from the world when it leaves.
+3. The server answers with `welcome`, then patches.
+
+Reconnects use Colyseus' reconnection token within `reconnectSeconds`; after that the client joins again with the same ticket and gets the same character (with `keepPlayers: true`). Server-controlled bots never connect — they are players flagged `data['gaime-bot']` and driven by `GameDefinition.bot`.
+
 Close codes: **4102** removed, **4103** the game was opened in another tab. (4000–4010 belong to Colyseus.)
 
-HTTP: `GET /health` → `{ ok, game, version, error, uptime }` (the version of the code that is **loaded** — also after HMR), `GET /gaime/room` → `{ roomId }`, `GET /gaime/stats` → tick/publish costs, patch sizes, event-loop delay, memory, workers. `/gaime/admin/*` — operator API (token).
+HTTP: `GET /health` → `{ ok, game, version, error, uptime }` (the version of the code that is **loaded** — also after HMR), `GET /gaime/room` → `{ roomId }`, `GET /gaime/stats` → tick rate, tick/publish costs, patch sizes, event-loop delay, memory, workers (reading it resets nothing). `/gaime/admin/*` — operator API (token).
 
 ## Delta sync
 
@@ -30,7 +41,7 @@ The server never sends the authoritative object. On publish it makes a **project
 - `values` — everything else as whole values when they change. **New world fields work without configuration** — just less efficiently until you add them to `entities`/`streams`.
 - `shared` — keys replaced wholesale and never mutated (e.g. `catalog`): compared by reference, left out of the checkpoint, rebuilt in `prepare`.
 
-Clients sharing a base get the same bytes (one diff and one encoding per group). A client whose send buffer exceeds 64 KB is skipped until it drains (then it gets a patch from its own base).
+Clients sharing a base get the same bytes (one diff and one encoding per group). With a per-player `view` (hidden information, [SERVER.md](SERVER.md#per-player-views)) each client's projection is passed through `view(projection, playerId)` and diffed separately — more CPU per publish, same wire format. A client whose send buffer exceeds 64 KB is skipped until it drains (then it gets a patch from its own base).
 
 ```ts
 network: {
@@ -77,8 +88,8 @@ chat: {
 | --- | --- |
 | `?lag=150&jitter=40&loss=5` in the game URL | bad-network simulation in the browser: round-trip delay (ms), ± spread, % of dropped inputs; message order is preserved like on TCP |
 | `GAIME_LATENCY_MS=120 npm run dev` | delay on the server side (for every client, `COLYSEUS_LATENCY`) |
-| F3 in the example game | ping, patches/s, KB/s, inputs/s, resyncs + live server and worker costs |
-| `npm run load -- --bots 50 --seconds 30` | real WebSocket bots: join time, RTT p50/p95/p99/max, messages and KB per bot, maximum tick/publish/patch, event-loop delay; warns when the tick does not fit its budget |
+| F3 in any game using `GameUi` | ping, patches/s, KB/s, inputs/s, resyncs + live server and worker costs |
+| `npm run load -- --bots 50 --seconds 30` | real WebSocket bots: join time, RTT p50/p95/p99/max, messages and KB per bot, maximum tick/publish/patch, event-loop delay; warns when the tick does not fit its budget (`1000 / tickRate` ms) |
 | `gaime load --input '{"mx":"$rand","fire":"$bool"}' --rate 30 --chat 0.5` | your own input template (`$rand`, `$rand*25`, `$bool`, `$int(a,b)`, `$pick(a|b)`), rate, chat |
 | `npm run smoke` | correctness: patches, chat, reconnect, tab takeover, (`--hmr`) backend hot reload |
 

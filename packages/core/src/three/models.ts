@@ -41,12 +41,16 @@ export class ModelLibrary {
   async load(shape: string, url: string, options: { height?: number; rotateY?: number; tint?: boolean } = {}) {
     const source = await loadGltf(url);
     const template = source.clone(true);
+    // Rotate first, then centre the rotated bounds (rotating after centring moves the model off-centre).
+    template.rotation.y = options.rotateY ?? 0;
+    template.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(template);
     const size = box.getSize(new THREE.Vector3());
     const scale = (options.height ?? 1) / (size.y || 1);
     const wrapper = new THREE.Group();
-    template.position.set(-(box.min.x + box.max.x) / 2, -box.min.y, -(box.min.z + box.max.z) / 2);
-    template.rotation.y = options.rotateY ?? 0;
+    template.position.x -= (box.min.x + box.max.x) / 2;
+    template.position.y -= box.min.y;
+    template.position.z -= (box.min.z + box.max.z) / 2;
     wrapper.add(template);
     wrapper.scale.setScalar(scale);
     this.register(shape, visual => {

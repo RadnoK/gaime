@@ -24,6 +24,7 @@ const coreSrc = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  * - public HMR over wss behind a reverse proxy (`GAIME_PUBLIC_URL`).
  *
  * Environment: GAIME_PORT, GAIME_PUBLIC_URL, GAIME_ALLOWED_HOSTS, GAIME_APPLYING_FILE, GAIME_VERSION.
+ * The production server reads GAIME_PORT (then PORT) again at start; the build-time value is its default.
  */
 export function gaime(options: GaimeViteOptions = {}): PluginOption[] {
   const port = Number(process.env.GAIME_PORT || 5173);
@@ -39,7 +40,10 @@ export function gaime(options: GaimeViteOptions = {}): PluginOption[] {
     ...(process.env.GAIME_ALLOWED_HOSTS ?? '').split(',').map(host => host.trim()).filter(Boolean),
   ];
 
-  const game = colyseus({ serverEntry, serveClient: false, port });
+  // The production entry is generated as `server.listen(<port>)`: pass an expression so the
+  // built server reads GAIME_PORT / PORT when it starts; the build-time port is the default.
+  const runtimePort = `Number(process.env.GAIME_PORT || process.env.PORT || ${port})` as unknown as number;
+  const game = colyseus({ serverEntry, serveClient: false, port: runtimePort });
   // A live sync writes many files at once: reload the backend once, after the whole tree landed.
   for (const plugin of game) {
     const original = plugin.hotUpdate;
@@ -105,15 +109,17 @@ export function gaime(options: GaimeViteOptions = {}): PluginOption[] {
   };
 
   // Worker threads load their TypeScript through the same dev environment as the game server.
+  let root = process.cwd();
   const workers: Plugin = {
     name: 'gaime:workers',
+    config(user) { root = resolve(user.root ?? process.cwd()); },
     configureServer(server) {
       (globalThis as Record<symbol, unknown>)[Symbol.for('gaime.vite.colyseus')] = server.environments.colyseus;
     },
     // Production: bundle src/workers/*.ts and the worker bootstrap next to server.mjs.
     configEnvironment(name, _config, env) {
       if (name !== 'colyseus' || env.command !== 'build') return;
-      const dir = resolve(process.cwd(), 'src/workers');
+      const dir = resolve(root, 'src/workers');
       const input: Record<string, string> = { 'gaime-worker': resolve(coreSrc, 'server/worker-bootstrap.mjs') };
       if (existsSync(dir)) for (const file of readdirSync(dir)) if (/^[a-z0-9][a-z0-9-]*\.ts$/.test(file)) input[`workers/${basename(file, '.ts')}`] = resolve(dir, file);
       return {

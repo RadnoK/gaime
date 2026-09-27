@@ -9,7 +9,7 @@ import type { GameContext, GameDefinition } from './game';
 import { createChat } from './chat';
 import { readCheckpoint, saveCheckpoint } from './persistence';
 import { clearError, markError, runtime, setRoom } from './runtime';
-import { recordClients, recordPublish, recordTick } from './metrics';
+import { recordClients, recordPublish, recordTick, recordTickRate } from './metrics';
 
 type Cache<W> = { world: W; identities: Record<string, string>; sessions: Record<string, string> };
 type Command = { type: string; [key: string]: unknown };
@@ -22,6 +22,7 @@ const BOT = 'gaime-bot';
 const BACKPRESSURE_BYTES = 64 * 1024;
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+const cleanName = (raw: string) => raw.replace(/\s+/g, ' ').trim().slice(0, 24);
 
 /**
  * Builds the single shared room of a game. Everything that is not game rules lives here:
@@ -71,6 +72,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       this.autoDispose = false;
       this.maxMessagesPerSecond = game.maxMessagesPerSecond ?? 90;
       setRoom(this);
+      recordTickRate(tickRate);
       try {
         const saved = readCheckpoint<W>(game.name);
         if (saved) { this.world = this.load(saved.world); this.identities = saved.identities; }
@@ -105,12 +107,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
         if (!id || !payload || typeof payload !== 'object' || typeof (payload as Command).type !== 'string') return;
         const command = payload as Command;
         this.dirty = true; this.publishSoon = true;
-        let reply: string | void;
-        try { reply = command.type.startsWith('$') ? this.engineCommand(id, command) : game.command?.(this.world, id, command, this.ctx); }
-        catch (error) {
-          console.error(`[gaime] command ${command.type}`, error);
-          reply = `Error in the code of command "${command.type}": ${message(error)}`;
-        }
+        const reply = this.runCommand(id, command, command.type.startsWith('$'));
         if (typeof reply === 'string' && reply) client.send('notice', reply);
       });
 
@@ -182,6 +179,15 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       markError(error);
     }
 
+    /** Client and `ctx.command` commands: an error in game code becomes the reply, never an exception. */
+    runCommand(id: string, command: Command, engine = false): string | void {
+      try { return engine ? this.engineCommand(id, command) : game.command?.(this.world, id, command, this.ctx); }
+      catch (error) {
+        console.error(`[gaime] command ${command.type}`, error);
+        return `Error in the code of command "${command.type}": ${message(error)}`;
+      }
+    }
+
     engineCommand(id: string, command: Command): string | void {
       const player = this.world.players[id];
       if (command.type === '$chat') return this.chat(this.world, id, command.text);
@@ -222,7 +228,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
         findPlayer: query => findPlayer(room.world.players, query) as PlayerOf<W> | undefined,
         addBot: name => room.addBot(name),
         isBot: playerId => !!room.world.players[playerId]?.data[BOT],
-        command: (playerId, command) => game.command?.(room.world, playerId, command, room.ctx),
+        command: (playerId, command) => room.runCommand(playerId, command),
       };
     }
 
@@ -230,7 +236,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       if (!game.bot) throw new Error('This game has no bot() brain (GameDefinition.bot).');
       const id = `bot-${randomUUID().slice(0, 8)}`;
       const count = Object.values(this.world.players).filter(p => p.data[BOT]).length;
-      const player = game.createPlayer(this.world, id, name || `Bot ${count + 1}`, this.ctx);
+      const player = game.createPlayer(this.world, id, this.freeName(id, cleanName(name ?? '') || `Bot ${count + 1}`), this.ctx);
       player.data[BOT] = true;
       player.online = true;
       this.world.players[id] = player;
@@ -240,11 +246,22 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       return id;
     }
 
+    nameTaken(id: string, name: string) {
+      return Object.values(this.world.players).some(other => other.id !== id && other.name.toLowerCase() === name.toLowerCase());
+    }
+
+    /** `name`, or `name 2`, `name 3`… when another player already uses it. */
+    freeName(id: string, name: string) {
+      let candidate = name;
+      for (let n = 2; this.nameTaken(id, candidate); n++) candidate = `${name.slice(0, 20)} ${n}`;
+      return candidate;
+    }
+
     rename(id: string, raw: string): string | void {
-      const name = raw.replace(/\s+/g, ' ').trim().slice(0, 24);
+      const name = cleanName(raw);
       const player = this.world.players[id];
       if (!player || !name) return 'Usage: /nick <new nick>';
-      if (Object.values(this.world.players).some(other => other.id !== id && other.name.toLowerCase() === name.toLowerCase())) return `The nickname "${name}" is taken.`;
+      if (this.nameTaken(id, name)) return `The nickname "${name}" is taken.`;
       pushFeed(this.world, `${player.name} is now known as ${name}.`);
       player.name = name;
       this.dirty = true;
@@ -281,8 +298,18 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
 
     /** Fill new fields from defaults, then the game's explicit migration. */
     load(raw: unknown): W {
+      // A throwaway world and context: the template must not touch the real world (seq, feed, events).
       const scratch = game.createWorld();
-      const template = game.createPlayer(scratch, 'template', 'template', { ...this.ctx, world: scratch, log() {}, notify() {} } as GameContext<W>) as BasePlayer;
+      const quiet: GameContext<W> = {
+        ...this.ctx, world: scratch, log() {}, notify() {}, emit() {}, save() {}, removePlayer() {}, job() {},
+        nextId: () => nextId(scratch),
+        isHost: () => false,
+        findPlayer: () => undefined,
+        isBot: () => false,
+        addBot: () => { throw new Error('addBot is not available while building the player template.'); },
+        command: () => undefined,
+      };
+      const template = game.createPlayer(scratch, 'template', 'template', quiet) as BasePlayer;
       const world = hydrate(structuredClone(raw), game.createWorld(), template);
       return game.migrate ? game.migrate(world) : world;
     }
@@ -377,16 +404,18 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
     }
 
     onJoin(client: Client, options: { name?: unknown; ephemeral?: unknown }, auth: { ticket: string }) {
-      const name = typeof options?.name === 'string' ? options.name.replace(/\s+/g, ' ').trim().slice(0, 24) : '';
+      const name = typeof options?.name === 'string' ? cleanName(options.name) : '';
       let id = this.identities[auth.ticket];
       if (!id || !this.world.players[id]) {
         id = randomUUID();
-        this.world.players[id] = game.createPlayer(this.world, id, name || `Player ${Object.keys(this.world.players).length + 1}`, this.ctx);
+        this.world.players[id] = game.createPlayer(this.world, id, this.freeName(id, name || `Player ${Object.keys(this.world.players).length + 1}`), this.ctx);
         this.identities[auth.ticket] = id;
         if (options?.ephemeral === true) this.world.players[id].data[EPHEMERAL] = true;
         else pushFeed(this.world, `${this.world.players[id].name} joined the game.`);
       } else if (name && name !== this.world.players[id].name) {
-        this.world.players[id].name = name;
+        // Same rule as /nick; a taken name keeps the current one.
+        if (this.nameTaken(id, name)) client.send('notice', `The nickname "${name}" is taken — you keep "${this.world.players[id].name}".`);
+        else this.world.players[id].name = name;
       }
       // The same browser identity opened in another tab takes over the character.
       for (const other of this.clients) {

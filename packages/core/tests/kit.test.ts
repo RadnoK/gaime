@@ -2,11 +2,11 @@ import { describe, expect, test } from 'vitest';
 import { seeded } from '../src/shared';
 import {
   SpatialHash, raycast, rayCircle, separate, clampToCircle, keepOutOfCircle, circleRect,
-  launch, stepProjectiles, ballisticAngle, type Projectile,
+  launch, stepProjectiles, wasHit, ballisticAngle, type Projectile,
   cooldown, every, schedule, due, status,
-  createMatch, setReady, stepMatch, endMatch, toLobby,
+  createMatch, setReady, stepMatch, endMatch, toLobby, matchTimeLeft,
   createTurns, isTurnOf, nextTurn, turnExpired, freezeTurn, resumeTurn, syncTurns, currentTurn,
-  addItem, takeItem, transferItem, hasItem,
+  addItem, takeItem, transferItem, hasItem, itemCount,
   weighted, shuffle, int, pointInRing,
   balancedTeam, freeColor, moveTopDown, addEffect, pruneEffects, type Effect,
 } from '../src/kit';
@@ -39,7 +39,24 @@ describe('spatial and collision', () => {
     const q = { x: 0.1, z: 0 }; keepOutOfCircle(q, { x: 0, z: 0 }, 2); expect(q.x).toBeCloseTo(2);
     expect(circleRect({ x: -1, z: 5 }, 1.1, { x: 0, z: 0, width: 10, depth: 10 })).toBe(true);
   });
+
+  test('separate pushes apart items at exactly the same position, deterministically', () => {
+    const run = () => { const items = [{ x: 1, z: 1 }, { x: 1, z: 1 }, { x: 1, z: 1 }]; for (let i = 0; i < 20; i++) separate(items, () => 0.5); return items; };
+    const items = run();
+    for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) expect(Math.hypot(items[i].x - items[j].x, items[i].z - items[j].z)).toBeGreaterThan(0.5);
+    expect(run()).toEqual(items);
+  });
+
+  test('SpatialHash keeps far-apart cells separate', () => {
+    const far = { x: 0, z: 70_000 * 4 };
+    const grid = new SpatialHash<Vec>(4).rebuild([{ x: 0, z: 0 }, far, { x: -1e7, z: 3e7 }]);
+    expect(grid.query({ x: 0, z: 0 }, 1)).toEqual([{ x: 0, z: 0 }]);
+    expect(grid.query(far, 1)).toEqual([far]);
+    expect(grid.query({ x: -1e7, z: 3e7 }, 1)).toHaveLength(1);
+  });
 });
+
+type Vec = { x: number; z: number };
 
 describe('projectiles', () => {
   test('move, hit targets, hit the ground and expire', () => {
@@ -63,6 +80,26 @@ describe('projectiles', () => {
     expect(impacts).toEqual(['p1:target', 'p2:ground']);
     expect(expired).toEqual(['p3']);
     expect(Object.keys(projectiles)).toEqual([]);
+  });
+
+  test('a piercing projectile hits each target once', () => {
+    const targets = [{ id: 't1', x: 0, z: 2 }, { id: 't2', x: 0, z: 4 }];
+    const projectiles: Record<string, Projectile> = { p: launch({ id: 'p', kind: 'lance', owner: 'a', from: { x: 0, z: 0 }, angle: 0, speed: 10, radius: 0.1, time: 0 }) };
+    const hits: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      stepProjectiles(projectiles, {
+        dt: 1 / 30, time: i / 30, substeps: 4,
+        hit: p => targets.find(t => !wasHit(p, t.id) && Math.hypot(p.x - t.x, p.z - t.z) < 0.8),
+        onImpact: (_p, t) => { if (t) hits.push(t.id); return true; },
+      });
+    }
+    expect(hits).toEqual(['t1', 't2']);
+    expect(JSON.parse(JSON.stringify(projectiles.p.data))).toEqual(projectiles.p.data);
+    // Without the filter in `hit` the repeated target is skipped by stepProjectiles itself.
+    const again: Record<string, Projectile> = { q: launch({ id: 'q', kind: 'lance', owner: 'a', from: { x: 0, z: 0 }, angle: 0, speed: 10, radius: 0.1, time: 0 }) };
+    const counted: string[] = [];
+    for (let i = 0; i < 30; i++) stepProjectiles(again, { dt: 1 / 30, time: i / 30, hit: p => targets.find(t => Math.hypot(p.x - t.x, p.z - t.z) < 0.8), onImpact: (_p, t) => { if (t) counted.push(t.id); return true; } });
+    expect(counted).toEqual(['t1', 't2']);
   });
 
   test('ballisticAngle lands the shot on the target', () => {
@@ -93,6 +130,16 @@ describe('timers', () => {
     expect(status.value(data, 'slow', 3, 1)).toBe(1);
     expect(JSON.parse(JSON.stringify(data))).toEqual(data);
   });
+
+  test('every after a long gap fires once, then a full interval later', () => {
+    const data: Record<string, number | string | boolean> = {};
+    every(data, 'beat', 0, 2);
+    expect(every(data, 'beat', 2.1, 2)).toBe(true);
+    expect(data.beat).toBe(4);
+    expect(every(data, 'beat', 20, 2)).toBe(true);
+    expect(every(data, 'beat', 21, 2)).toBe(false);
+    expect(every(data, 'beat', 22, 2)).toBe(true);
+  });
 });
 
 describe('match and turns', () => {
@@ -113,6 +160,19 @@ describe('match and turns', () => {
     expect(stepMatch(createMatch(), 0, ['a'], { autoStart: true, countdown: 0 })).toBe('start');
   });
 
+  test('matchTimeLeft is 0 outside a countdown or a timed round', () => {
+    const match = createMatch();
+    stepMatch(match, 0, ['a'], { autoStart: true, countdown: 5 });
+    expect(matchTimeLeft(match, 1)).toBe(4);
+    stepMatch(match, 1, [], { autoStart: true, countdown: 5 });
+    expect(match.phase).toBe('lobby');
+    expect(matchTimeLeft(match, 1)).toBe(0);
+    stepMatch(match, 2, ['a'], { autoStart: true, countdown: 0, duration: 60 });
+    expect(matchTimeLeft(match, 12)).toBe(50);
+    endMatch(match, 20, null);
+    expect(matchTimeLeft(match, 21)).toBe(0);
+  });
+
   test('turn order, skipping, freezing and syncing', () => {
     const turns = createTurns(['a', 'b', 'c'], 0, 30);
     expect(isTurnOf(turns, 'a')).toBe(true);
@@ -126,6 +186,29 @@ describe('match and turns', () => {
     expect(turns.order).toEqual(['c', 'd']);
     expect(currentTurn(turns)).toBe('c');
   });
+
+  test('nextTurn with nobody able to play unfreezes the clock', () => {
+    const turns = createTurns(['a', 'b'], 0, 30);
+    freezeTurn(turns, 10);
+    expect(nextTurn(turns, 12, 30, () => false)).toBeUndefined();
+    expect(turns.frozen).toBeNull();
+    expect(turns.endsAt).toBe(32);
+    expect(isTurnOf(turns, 'a')).toBe(true);
+  });
+
+  test('syncTurns passes a departed current turn to the next player, wrapping around', () => {
+    const last = createTurns(['a', 'b', 'c'], 0, 30, 2);
+    syncTurns(last, ['a', 'b']);
+    expect(currentTurn(last)).toBe('a');
+    const middle = createTurns(['a', 'b', 'c', 'd'], 0, 30, 1);
+    syncTurns(middle, ['a', 'd']);
+    expect(currentTurn(middle)).toBe('d');
+    const empty = createTurns(['a'], 0, 30);
+    syncTurns(empty, []);
+    expect(empty.index).toBe(0);
+    syncTurns(empty, ['z']);
+    expect(currentTurn(empty)).toBe('z');
+  });
 });
 
 describe('inventory, random, teams, movement, effects', () => {
@@ -137,6 +220,12 @@ describe('inventory, random, teams, movement, effects', () => {
     expect(bag).toEqual({});
     expect(transferItem(chest, bag, 'gold', 10)).toBe(5);
     expect(hasItem(bag, 'gold', 5)).toBe(true);
+    const over = { gem: 12 };
+    expect(addItem(over, 'gem', 3, 10)).toBe(0);
+    expect(itemCount(over, 'gem')).toBe(12);
+    expect(addItem(over, 'gem', -5)).toBe(0);
+    expect(addItem(over, 'gem', Number.NaN)).toBe(0);
+    expect(itemCount(over, 'gem')).toBe(12);
   });
 
   test('random helpers are reproducible with a seed', () => {
@@ -149,6 +238,7 @@ describe('inventory, random, teams, movement, effects', () => {
 
   test('teams, movement and effects', () => {
     expect(balancedTeam(['red', 'blue'], ['red', 'red', 'blue'])).toBe('blue');
+    expect(() => balancedTeam([], [])).toThrow(/at least one team/);
     expect(freeColor(['#ff5977'])).not.toBe('#ff5977');
     const e = { x: 0, z: 0 };
     moveTopDown(e, { mx: 1, mz: 1 }, 10, 1);

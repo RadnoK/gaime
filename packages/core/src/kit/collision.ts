@@ -69,10 +69,13 @@ export function separate<T extends Vec2>(items: T[], radiusOf: (item: T) => numb
       const min = radiusOf(a) + radiusOf(b);
       const dx = b.x - a.x; const dz = b.z - a.z;
       const d = Math.hypot(dx, dz);
-      if (d >= min || d < 1e-6) continue;
+      if (d >= min) continue;
+      // Exactly on top of each other: a deterministic direction per pair (golden angle).
+      const nx = d < 1e-6 ? Math.cos(j * 2.399963) : dx / d;
+      const nz = d < 1e-6 ? Math.sin(j * 2.399963) : dz / d;
       const push = (min - d) * strength;
-      a.x -= (dx / d) * push; a.z -= (dz / d) * push;
-      b.x += (dx / d) * push; b.z += (dz / d) * push;
+      a.x -= nx * push; a.z -= nz * push;
+      b.x += nx * push; b.z += nz * push;
     }
   }
 }

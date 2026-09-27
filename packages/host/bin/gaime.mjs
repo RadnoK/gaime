@@ -6,7 +6,7 @@ import { smoke } from '../src/smoke.mjs';
 import { load } from '../src/load.mjs';
 import { newGame, templates } from '../src/new-game.mjs';
 import { git } from '../src/git.mjs';
-import { alive, readJson, short } from '../src/util.mjs';
+import { alive, delay, flagValue, readJson, short } from '../src/util.mjs';
 
 const HELP = `gaime — game tools (run inside a game directory, e.g. games/starter)
 
@@ -40,10 +40,7 @@ GAIME_GATES (e.g. "check,test"), GAIME_DATA_DIR, GAIME_STATE_DIR, GAIME_PUBLIC_D
 GAIME_LATENCY_MS (simulated server round trip). Details: docs/DEPLOYMENT.md, docs/PROTOCOL.md`;
 
 const [command = 'help', ...args] = process.argv.slice(2);
-const flag = (name, fallback) => {
-  const index = args.indexOf(`--${name}`);
-  return index >= 0 && args[index + 1] !== undefined ? args[index + 1] : fallback;
-};
+const flag = (name, fallback) => flagValue(args, name, fallback);
 const VALUED = new Set(['--bots', '--seconds', '--rate', '--input', '--chat', '--title', '--from']);
 const positional = () => args.filter((arg, i) => !arg.startsWith('--') && !VALUED.has(args[i - 1]));
 
@@ -54,26 +51,32 @@ function config() {
 function target() {
   const c = config();
   const state = c ? readJson(paths(c).state, {}) : {};
-  const url = process.env.GAIME_URL ?? `http://127.0.0.1:${process.env.GAIME_PORT ?? state.port ?? c?.port ?? 5173}`;
-  let token = process.env.GAIME_ADMIN_TOKEN;
-  // The supervisor's data dir first, then the local `npm run dev` data dir.
-  for (const dir of [process.env.GAIME_DATA_DIR, c?.dataDir, resolve('.gaime/data')]) {
-    if (token || !dir) continue;
-    const file = join(dir, 'admin-token');
-    if (existsSync(file)) token = readFileSync(file, 'utf8').trim();
+  // A host.json left by a supervisor that is not running says nothing about the game on this machine.
+  const supervised = alive(state.pid);
+  const url = process.env.GAIME_URL ?? `http://127.0.0.1:${process.env.GAIME_PORT ?? (supervised ? state.port : undefined) ?? 5173}`;
+  // Candidates in order of likelihood; `admin` tries the next one on 401.
+  const dirs = supervised ? [c?.dataDir, resolve('.gaime/data')] : [resolve('.gaime/data'), c?.dataDir];
+  const tokens = [process.env.GAIME_ADMIN_TOKEN];
+  for (const dir of [process.env.GAIME_DATA_DIR, ...dirs]) {
+    const file = dir && join(dir, 'admin-token');
+    if (file && existsSync(file)) tokens.push(readFileSync(file, 'utf8').trim());
   }
-  return { url, token };
+  return { url, tokens: [...new Set(tokens.filter(Boolean))] };
 }
 
 async function admin(action, body) {
-  const { url, token } = target();
-  if (!token) throw new Error('No admin token: set GAIME_ADMIN_TOKEN or run inside the directory of a game that is running.');
-  const response = await fetch(`${url}/gaime/admin/${action}`, {
-    method: body ? 'POST' : 'GET',
-    headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(10_000),
-  }).catch(error => { throw new Error(`Cannot reach ${url}: ${error.message}`); });
+  const { url, tokens } = target();
+  if (!tokens.length) throw new Error('No admin token: set GAIME_ADMIN_TOKEN or run inside the directory of a game that is running.');
+  let response;
+  for (const token of tokens) {
+    response = await fetch(`${url}/gaime/admin/${action}`, {
+      method: body ? 'POST' : 'GET',
+      headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(10_000),
+    }).catch(error => { throw new Error(`Cannot reach ${url}: ${error.message}`); });
+    if (response.status !== 401) break;
+  }
   const result = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
   if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
   return result;
@@ -89,25 +92,36 @@ try {
       break;
     case 'status': {
       const c = resolveConfig();
+      const json = args.includes('--json');
       const state = readJson(paths(c).state, null);
-      if (!state) { console.log(`No state in ${c.stateDir}. The supervisor has not run yet.`); break; }
+      if (!state) {
+        if (json) print({ state: null, stateDir: c.stateDir }); else console.log(`No state in ${c.stateDir}. The supervisor has not run yet.`);
+        break;
+      }
       let health = null;
-      try { health = await (await fetch(`http://127.0.0.1:${state.port ?? c.port}/health`, { signal: AbortSignal.timeout(1500) })).json(); } catch {}
+      const base = process.env.GAIME_URL ?? `http://127.0.0.1:${state.port ?? c.port}`;
+      try { health = await (await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) })).json(); } catch {}
       const running = alive(state.pid);
+      if (json) { print({ ...state, running, health }); break; }
       console.log(`${c.game} · ${state.mode} · ${running ? `supervisor PID ${state.pid}` : 'supervisor not running'} · ${state.status}${state.paused ? ' · UPDATES PAUSED' : ''}`);
       console.log(`version: ${short(state.current?.sha)}   previous: ${short(state.previous?.sha)}   game /health: ${health ? `${health.ok ? 'ok' : 'ERROR'} ${short(health.version)}${health.error ? ` — ${health.error}` : ''}` : 'no response'}`);
       if (state.failed) console.log(`last failed commit: ${short(state.failed.sha)} — ${state.failed.error}`);
       if (state.error && state.error !== state.failed?.error) console.log(`last error: ${state.error}`);
       for (const entry of (state.history ?? []).slice(0, 8)) console.log(`  ${entry.at?.slice(0, 19).replace('T', ' ')}  ${short(entry.sha)}  ${entry.result}${entry.seconds ? ` ${entry.seconds}s` : ''}  ${entry.subject ?? ''}${entry.error ? ` — ${entry.error}` : ''}`);
-      if (args.includes('--json')) print({ ...state, running, health });
       break;
     }
     case 'rollback': case 'resume': case 'pause': case 'redeploy': case 'restart': {
       const c = resolveConfig();
       const state = readJson(paths(c).state, {});
       if (!alive(state.pid)) { console.error('The supervisor is not running — start it first: gaime host'); process.exitCode = 1; break; }
-      sendControl(c, command);
-      console.log(`Sent "${command}". See the supervisor log and: gaime status`);
+      const id = sendControl(c, command);
+      // The supervisor handles controls between deploys: wait for its acknowledgement a while.
+      const deadline = Date.now() + (command === 'rollback' ? 180_000 : 30_000);
+      let control;
+      while (Date.now() < deadline && alive(state.pid) && (control = readJson(paths(c).state, {}).control)?.id !== id) await delay(250);
+      if (control?.id !== id) console.log(`Requested "${command}" — the supervisor has not handled it yet (busy deploying?). See: gaime status`);
+      else if (control.ok) console.log(`Done: ${command}.`);
+      else { console.error(`${command} failed: ${control.error}`); process.exitCode = 1; }
       break;
     }
     case 'players': {

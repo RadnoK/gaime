@@ -62,3 +62,7 @@ Commit `games/<name>` and `package-lock.json`, push to `main`. Hosting it is a s
 - Side-view games: keep the plane x/z and treat z as "up"; map it in the renderer.
 - Remove template leftovers (crystal, coins, weapons) instead of leaving dead code — the next AI will copy it.
 - Keep the template's HMR/cleanup structure in `main.ts`, or client hot reload leaks canvases and listeners.
+
+## Reference
+
+`docs/TEMPLATES.md`, `docs/TUTORIAL.md` (a whole game built from blank), `docs/NEW_GAME.md`, `docs/COOKBOOK.md`, `docs/SERVER.md`.

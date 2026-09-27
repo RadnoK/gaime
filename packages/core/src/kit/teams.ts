@@ -7,6 +7,7 @@ export const TEAM_COLORS = ['#ff5977', '#59a8ff', '#7dff9b', '#ffd659', '#b481ff
  * `current` = team of every existing player.
  */
 export function balancedTeam(teams: readonly string[], current: Iterable<string | undefined>): string {
+  if (!teams.length) throw new Error('balancedTeam: pass at least one team id.');
   const sizes = new Map(teams.map(team => [team, 0]));
   for (const team of current) if (team && sizes.has(team)) sizes.set(team, sizes.get(team)! + 1);
   return [...sizes.entries()].sort((a, b) => a[1] - b[1] || teams.indexOf(a[0]) - teams.indexOf(b[0]))[0][0];

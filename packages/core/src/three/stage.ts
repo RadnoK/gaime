@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { disposeOwned } from './layer';
 
 export interface StageOptions {
   container: HTMLElement;
@@ -66,14 +67,15 @@ export function createStage(options: StageOptions): Stage {
       cancelAnimationFrame(frame);
       observer.disconnect();
       callbacks.clear();
-      disposeObject(scene);
+      // Geometry/materials cached by ModelLibrary and createBar outlive the stage (HMR rebuilds it).
+      disposeOwned(scene);
       renderer.dispose();
       canvas.remove();
     },
   };
 }
 
-/** Frees geometries, materials and textures of a subtree. */
+/** Frees all geometries, materials and textures of a subtree, shared ones too (entities: `disposeOwned`). */
 export function disposeObject(root: THREE.Object3D) {
   root.traverse(object => {
     const mesh = object as THREE.Mesh;

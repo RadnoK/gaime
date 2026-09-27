@@ -81,3 +81,7 @@ npm run check && npx vitest run games/<game>
 - Renaming a kind or its fields later breaks everyone's modules — pick names carefully now.
 - Don't put balance constants in the engine that modules can't override; put them on the definition with defaults.
 - The catalog is `shared` (sent by reference, never saved): keep it that way when you add kinds.
+
+## Reference
+
+`docs/MODULES.md#designing-module-kinds-for-game-authors`, `docs/SERVER.md`.

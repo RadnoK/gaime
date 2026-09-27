@@ -62,3 +62,7 @@ if (!world.flow.requested) {
 - Passing the whole world to the worker every tick: cloning costs more than it saves. Send only what the computation needs.
 - Forgetting the failure callback leaves `requested = true` forever.
 - Workers cannot call `ctx`, touch the world, or emit events — only return data.
+
+## Reference
+
+`docs/SERVER.md#heavy-processing-workers`, `docs/reference/CONFIG.md`.

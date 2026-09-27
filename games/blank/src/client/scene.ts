@@ -56,6 +56,7 @@ export class Scene {
     this.world = world;
     this.clock.sync(world.time);
     for (const player of Object.values(world.players)) this.tracks.push(player.id, world.time, { x: player.x, z: player.z });
+    this.tracks.retain(Object.keys(world.players));
     this.players.sync(Object.values(world.players).filter(player => player.online));
     this.pickups.sync(Object.values(world.pickups));
     const me = world.players[this.meId];

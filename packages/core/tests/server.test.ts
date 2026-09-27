@@ -28,6 +28,8 @@ const game = defineGame<World, { dx: number }>({
     if (command.type === 'ping') return 'pong';
     if (command.type === 'boom') ctx.emit('sound', { kind: 'boom' });
     if (command.type === 'later') ctx.job(Promise.resolve(41), (w, value) => { w.ticks = -1000; ctx.notify(id, `job ${value + 1}`); });
+    if (command.type === 'explode') throw new Error('kaboom');
+    if (command.type === 'relay') return `relayed: ${ctx.command(id, { type: 'explode' })}`;
   },
   requests: {
     double: (_world, _id, payload) => (payload as number) * 2,
@@ -160,6 +162,57 @@ describe('game server', () => {
     expect((await admin('command', { name: 'double', args: [] })).body).toHaveProperty('ticks');
     expect((await admin('command', { name: 'nope', args: [] })).status).toBe(400);
     await room.leave();
+  }, 20000);
+
+  test('ctx.command turns an error in game code into its reply instead of throwing', async () => {
+    await boot();
+    const { roomId } = await (await fetch(`${url}/gaime/room`)).json();
+    const room = await new Client(url).joinById(roomId, { name: 'Cmd', ticket: 'c'.repeat(24) });
+    const notices: string[] = [];
+    room.onMessage('welcome', () => {}); room.onMessage('patch', () => {});
+    room.onMessage('notice', text => notices.push(text));
+    room.send('command', { type: 'relay' });
+    await until(() => notices.length > 0);
+    expect(notices[0]).toBe('relayed: Error in the code of command "explode": kaboom');
+    expect((await (await fetch(`${url}/health`)).json()).ok).toBe(true);
+    await room.leave();
+  }, 20000);
+
+  test('a join with a taken name gets a free one; a rejoin never steals a name', async () => {
+    await boot();
+    const { roomId } = await (await fetch(`${url}/gaime/room`)).json();
+    const join = async (name: string, ticket: string) => {
+      const room = await new Client(url).joinById(roomId, { name, ticket });
+      const notices: string[] = [];
+      room.onMessage('welcome', () => {}); room.onMessage('patch', () => {}); room.onMessage('notice', text => notices.push(text));
+      return { room, notices };
+    };
+    const names = async () => (await (await fetch(`${url}/gaime/admin/players`, { headers: { authorization: `Bearer ${adminToken()}` } })).json()).map((p: { name: string }) => p.name).sort();
+    const ann = await join('Ann', 'a'.repeat(24));
+    const second = await join('ann', 'b'.repeat(24));
+    await until(async () => (await names()).length === 2);
+    expect(await names()).toEqual(['Ann', 'ann 2']);
+    await second.room.leave();
+    const bob = await join('Bob', 'b'.repeat(24));
+    await until(async () => (await names()).includes('Bob'));
+    await bob.room.leave();
+    const thief = await join('ANN', 'b'.repeat(24));
+    await until(() => thief.notices.some(text => /taken/.test(text)));
+    expect(await names()).toEqual(['Ann', 'Bob']);
+    await thief.room.leave(); await ann.room.leave();
+  }, 20000);
+
+  test('/gaime/stats can be read repeatedly without resetting the event-loop measurements', async () => {
+    await boot();
+    const started = Date.now();
+    while (Date.now() - started < 80) { /* block the event loop */ }
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const read = async () => (await (await fetch(`${url}/gaime/stats`)).json()) as { tickRate: number; eventLoopDelayMs: { max: number } };
+    const first = await read();
+    const second = await read();
+    expect(first.eventLoopDelayMs.max).toBeGreaterThan(40);
+    expect(second.eventLoopDelayMs.max).toBeGreaterThan(40);
+    expect(first.tickRate).toBe(30);
   }, 20000);
 
   test('an unreadable checkpoint is never overwritten', async () => {

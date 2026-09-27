@@ -22,16 +22,26 @@ services:
       - ./repo:/app
       - ./data:/data
       - ./ssh:/run/git-ssh:ro
+    # Only variables listed here reach the container (empty = the built-in default).
     environment:
       HOME: /tmp
       NPM_CONFIG_CACHE: /app/.gaime/npm-cache
       GAIME_MODE: ${GAIME_MODE:-live}
+      # Fixed: the healthcheck and gateway.conf expect 5173, the gateway mounts this public dir.
       GAIME_PORT: "5173"
       GAIME_DATA_DIR: /data
+      GAIME_PUBLIC_DIR: /app/.gaime/${GAME}/public
       GAIME_PUBLIC_URL: ${GAIME_PUBLIC_URL:-https://${DOMAIN:?set DOMAIN in .env}}
+      GAIME_ALLOWED_HOSTS: ${GAIME_ALLOWED_HOSTS:-}
+      GAIME_REMOTE: ${GAIME_REMOTE:-origin}
       GAIME_BRANCH: ${GAIME_BRANCH:-main}
       GAIME_POLL_MS: ${GAIME_POLL_MS:-3000}
       GAIME_GATES: ${GAIME_GATES:-auto}
+      GAIME_SOAK_MS: ${GAIME_SOAK_MS:-}
+      GAIME_START_TIMEOUT_MS: ${GAIME_START_TIMEOUT_MS:-}
+      GAIME_HMR_TIMEOUT_MS: ${GAIME_HMR_TIMEOUT_MS:-}
+      GAIME_SERVER_ENTRY: ${GAIME_SERVER_ENTRY:-}
+      GAIME_LATENCY_MS: ${GAIME_LATENCY_MS:-}
       GAIME_ADMIN_TOKEN: ${GAIME_ADMIN_TOKEN:-}
       GIT_SSH_COMMAND: >-
         ssh -i /run/git-ssh/deploy-key

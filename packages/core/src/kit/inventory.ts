@@ -12,10 +12,11 @@ export function hasItem(inventory: Inventory, id: string, count = 1) {
   return (inventory[id] ?? 0) >= count;
 }
 
-/** Adds up to `max` (per item); returns how many were actually added. */
+/** Adds up to `max` (per item); returns how many were actually added (0 for count ≤ 0 or when already at max). */
 export function addItem(inventory: Inventory, id: string, count = 1, max = Infinity) {
   const before = inventory[id] ?? 0;
-  const after = Math.min(max, before + count);
+  if (!(count > 0)) return 0;
+  const after = Math.max(before, Math.min(max, before + count));
   if (after <= 0) delete inventory[id]; else inventory[id] = after;
   return after - before;
 }

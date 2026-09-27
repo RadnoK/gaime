@@ -37,8 +37,8 @@ export function every(store: Store, key: string, time: number, interval: number,
     return immediately;
   }
   if (time < next) return false;
-  // Skip missed intervals (pauses, lag) instead of firing a burst.
-  store[key] = Math.max(next + interval, time + interval * 0.5);
+  // Keep the cadence when on time; after missed intervals (pauses, lag) fire once, then a full interval later.
+  store[key] = next + interval > time ? next + interval : time + interval;
   return true;
 }
 

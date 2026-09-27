@@ -18,7 +18,7 @@ type Events<W> = {
 export interface GameClientOptions {
   /** Same as `GameDefinition.name`. */
   game: string;
-  /** Server origin. Default: the page origin (Vite dev and production share one port). */
+  /** Server address (`http(s)://` or `ws(s)://`). Default: the page origin (Vite dev and production share one port). */
   url?: string;
   /**
    * `browser` (default): one character per browser profile (localStorage).
@@ -88,6 +88,7 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
   private pingTimer?: ReturnType<typeof setInterval>;
   private readonly gate = new InputGate<I>();
   private requestSeq = 0;
+  private readonly roomUrl: string;
   private readonly pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
   private sendAt = 0;
   private receiveAt = 0;
@@ -95,6 +96,7 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
 
   constructor(options: GameClientOptions) {
     this.sdk = new Client(options.url ?? location.origin);
+    this.roomUrl = roomUrl(options.url);
     const params = new URLSearchParams(location.search);
     const local = params.get('player')?.replace(/[^\w-]/g, '').slice(0, 24);
     this.storageKey = `gaime:${options.game}${local ? `:${local}` : ''}`;
@@ -168,7 +170,7 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
         catch { sessionStorage.removeItem(`${this.storageKey}:reconnect`); }
       }
       if (!room) {
-        const response = await fetch('/gaime/room', { cache: 'no-store' });
+        const response = await fetch(this.roomUrl, { cache: 'no-store' });
         if (!response.ok) throw new Error(`Game server unavailable (${response.status}).`);
         const { roomId } = await response.json() as { roomId: string };
         room = await this.sdk.joinById(roomId, { name: this.name, ticket: this.ticket });
@@ -294,6 +296,13 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
   private emitWorld(world: W) {
     const previous = this.world;
     this.world = world;
+    // Follow renames (/nick) so a later rejoin does not send the old name back.
+    const name = world.players[this.id]?.name;
+    if (name && name !== this.name) {
+      this.name = name;
+      localStorage.setItem(`${this.storageKey}:name`, name);
+      if (sessionStorage.getItem(`${this.storageKey}:active`) !== null) sessionStorage.setItem(`${this.storageKey}:active`, name);
+    }
     for (const listener of this.listeners.world) listener(world, previous);
   }
 
@@ -356,4 +365,14 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
     this.off();
     if (this.room) { this.room.reconnection.enabled = false; this.room.connection.close(); }
   }
+}
+
+/** `/gaime/room` on the http(s) side of the configured server address (ws → http, wss → https). */
+export function roomUrl(url?: string, page: string = location.href) {
+  const base = new URL(url ?? '/', page);
+  if (base.protocol === 'ws:') base.protocol = 'http:';
+  if (base.protocol === 'wss:') base.protocol = 'https:';
+  base.pathname = `${base.pathname.replace(/\/+$/, '')}/gaime/room`;
+  base.search = ''; base.hash = '';
+  return base.href;
 }

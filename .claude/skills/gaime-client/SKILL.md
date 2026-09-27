@@ -16,7 +16,7 @@ Files: `games/<game>/src/client/` — `main.ts` (wiring + HMR), `scene.ts` (Thre
 
 ## HUD
 
-`new GameUi({ client: net, parent: app, title, description, help, roster: { detail, colorOf }, menu: [...], actions: {...}, onEnter })` gives: lobby, status + ping, ☰ menu (pause, leave + yours), roster, feed + chat (Enter, `/help`), toasts for server notices, a banner (`ui.banner.set(html)`, buttons with `data-action="name"` call `actions.name`), F3 network stats, `ui.dialog(title)` panels. Put game widgets into `ui.top` (top bar), `ui.center` (bottom centre), `ui.layer` (free overlay). Helpers: `h('div', { class, onclick }, ...children)`, `meter()`, `escapeHtml()` (always escape player-made text!), `Writer` (update DOM only on change — HUDs render ~15×/s). Theme: override `--g-*` CSS variables in `style.css`.
+`new GameUi({ client: net, parent: app, title, description, help, roster: { detail, colorOf }, menu: [...], actions: {...}, onEnter })` gives: lobby, status + ping, ☰ menu (pause, leave + yours), roster, feed + chat (Enter, `/help`), toasts for server notices, a banner (`ui.banner.set(html)`, buttons with `data-action="name"` call `actions.name`), F3 network stats, `ui.dialog(title)` panels. Put game widgets into `ui.top` (top bar), `ui.center` (bottom centre), `ui.layer` (free overlay). Helpers: `h('div', { class, onclick }, ...children)`, `meter()`, `escapeHtml()` (always escape player-made text!), `Writer` (update DOM only on change — HUDs render ~15×/s). Theme: override `--g-*` CSS variables on `:root` in `style.css`, and import `@gaime/core/ui` before `./style.css` in `main.ts` so your overrides win.
 
 ## Scene
 
@@ -66,3 +66,7 @@ In the browser: one canvas after several hot reloads, no console errors, works w
 - `innerHTML` with player names without `escapeHtml` → XSS between players.
 - Anything in `main.ts` not registered in the `Scope` survives hot reloads twice → duplicated listeners/loops.
 - Client code must not import server code (`src/server/*`, `features/*/server.ts`).
+
+## Reference
+
+`docs/CLIENT.md` (GameClient, Scope/keep, Controls, GameUi, Stage, CameraRig, ModelLibrary, EffectsLayer, SoundBank), `docs/COOKBOOK.md` (HUD widgets, dialogs, sounds, glTF, touch/gamepad), `docs/TROUBLESHOOTING.md#hot-reload-problems`.
