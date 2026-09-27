@@ -6,7 +6,7 @@ import type { GameContext } from './game';
  * A GameContext for unit tests of game logic, without a room or network.
  * Collects notices and events; `flushJobs()` applies finished `ctx.job` results.
  */
-export function testContext<W extends BaseWorld>(world: W, options: { random?: () => number } = {}) {
+export function testContext<W extends BaseWorld>(world: W, options: { random?: () => number; command?: (playerId: string, command: { type: string; [key: string]: unknown }) => string | void } = {}) {
   const notices: Array<{ playerId: string; text: string }> = [];
   const events: Array<{ name: string; data: unknown; playerId?: string }> = [];
   const removed: string[] = [];
@@ -26,6 +26,9 @@ export function testContext<W extends BaseWorld>(world: W, options: { random?: (
       jobs.push(work.then(result => { ready.push(() => apply(world, result, ctx)); }, error => { ready.push(() => fail?.(world, error, ctx)); }));
     },
     findPlayer: query => findPlayer(world.players, query) as PlayerOf<W> | undefined,
+    addBot: () => { throw new Error('testContext: add bots with createPlayer + data["gaime-bot"] = true, or test through a real server.'); },
+    isBot: id => !!world.players[id]?.data['gaime-bot'],
+    command: (playerId, command) => options.command?.(playerId, command),
   };
   return {
     ctx, notices, events, removed,

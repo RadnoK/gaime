@@ -54,6 +54,7 @@ export function disposeOwned(root: THREE.Object3D) {
   root.traverse(object => {
     const mesh = object as THREE.Mesh;
     if (mesh.geometry && !mesh.userData.sharedGeometry) mesh.geometry.dispose();
+    if (mesh.userData.sharedMaterial) return;
     const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
     for (const material of materials) {
       for (const value of Object.values(material)) if (value instanceof THREE.Texture) value.dispose();

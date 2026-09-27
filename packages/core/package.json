@@ -9,6 +9,10 @@
     "./server": "./src/server/index.ts",
     "./client": "./src/client/index.ts",
     "./three": "./src/three/index.ts",
+    "./kit": "./src/kit/index.ts",
+    "./ui": "./src/ui/index.ts",
+    "./audio": "./src/audio/index.ts",
+    "./worker": "./src/worker/index.ts",
     "./vite": "./src/vite/index.ts"
   },
   "dependencies": {

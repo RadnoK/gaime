@@ -4,6 +4,8 @@ import type { ChatCommand, GameContext, GameDefinition } from './game';
 
 export interface ChatHost<W extends BaseWorld> {
   ctx: GameContext<W>;
+  /** The game defines a bot brain: enable /bot. */
+  bots?: boolean;
   rename(playerId: string, name: string): string | void;
   pause(playerId: string, paused: boolean): string | void;
 }
@@ -64,6 +66,19 @@ function builtins<W extends BaseWorld>(host: ChatHost<W>): Record<string, ChatCo
     },
     pause: { description: 'pause the game', host: true, run: (_w, id) => host.pause(id, true) },
     resume: { description: 'resume the game', host: true, run: (_w, id) => host.pause(id, false) },
+    ...(host.bots ? {
+      bot: {
+        description: 'add a bot, or remove all bots', usage: '[name] | remove', host: true,
+        run(world, _id, args, ctx) {
+          if (args.trim() === 'remove') {
+            const bots = Object.values(world.players).filter(p => ctx.isBot(p.id));
+            for (const bot of bots) ctx.removePlayer(bot.id);
+            return bots.length ? `Removed ${bots.length} bot(s).` : 'There are no bots.';
+          }
+          ctx.addBot(args.trim().slice(0, 24) || undefined);
+        },
+      } satisfies ChatCommand<W>,
+    } : {}),
   };
 }
 

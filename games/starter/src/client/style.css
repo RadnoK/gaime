@@ -1,93 +1,24 @@
-:root {
-  color-scheme: dark;
-  --bg: #0b0f14;
-  --panel: rgba(12, 17, 24, 0.82);
-  --line: rgba(120, 170, 220, 0.18);
-  --text: #e6edf3;
-  --muted: #8b98a5;
-  --accent: #59e3ff;
-  --danger: #ff5977;
-  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-}
-* { box-sizing: border-box; }
-[hidden] { display: none !important; }
-html, body, #app { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); }
+/* Crystal-specific styles. The generic HUD comes from @gaime/core/ui (theme: --g-* variables). */
+html, body, #app { margin: 0; height: 100%; overflow: hidden; background: var(--g-bg); color: var(--g-text); font-family: var(--g-font); }
 #app { position: relative; }
-.stage { position: absolute; inset: 0; cursor: crosshair; }
-button { font: inherit; color: var(--text); background: #1b2633; border: 1px solid var(--line); border-radius: 8px; padding: 0.5em 1em; cursor: pointer; }
-button:hover { border-color: var(--accent); }
-input { font: inherit; color: var(--text); background: rgba(0, 0, 0, 0.4); border: 1px solid var(--line); border-radius: 8px; padding: 0.55em 0.8em; }
-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-code { font-size: 0.9em; color: var(--accent); }
-.micro { font-size: 12px; color: var(--muted); }
-.meter { height: 8px; background: rgba(255, 255, 255, 0.08); border-radius: 4px; overflow: hidden; }
-.meter i { display: block; height: 100%; background: var(--accent); transition: width 0.15s; }
+.stage { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
 
-.hud { position: absolute; inset: 0; pointer-events: none; }
-.hud > *, .hud button, .hud input, .hud dialog { pointer-events: auto; }
-.top { position: absolute; top: 12px; left: 12px; right: 12px; display: flex; gap: 12px; align-items: center; pointer-events: none; }
-.top > div { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; display: flex; gap: 10px; align-items: center; pointer-events: auto; }
-.wave b { letter-spacing: 0.08em; }
-.wave span { color: var(--muted); font-size: 13px; }
-.crystal { flex: 1; max-width: 420px; }
-.crystal span, .score span { font-size: 11px; letter-spacing: 0.12em; color: var(--muted); }
-.crystal .meter { flex: 1; }
-.conn { margin-left: auto; }
-.conn button { padding: 0.2em 0.6em; }
-.pill { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: #203040; }
-.pill[data-state='connected'] { background: #133a2a; color: #7dff9b; }
-.pill[data-state='reconnecting'], .pill[data-state='connecting'] { background: #3a3013; color: #ffd659; }
-.pill[data-state='error'], .pill[data-state='full'], .pill[data-state='replaced'], .pill[data-state='removed'] { background: #3a1320; color: var(--danger); }
+.wave { display: flex; gap: 8px; align-items: baseline; letter-spacing: 0.06em; }
+.crystal { display: flex; gap: 10px; align-items: center; flex: 1; max-width: 420px; }
+.crystal .g-meter { flex: 1; }
 
-.roster { position: absolute; top: 72px; right: 12px; width: 190px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px; font-size: 13px; pointer-events: none; }
-.roster:empty { display: none; }
-.roster div { display: flex; align-items: center; gap: 6px; padding: 3px 4px; }
-.roster div.off { opacity: 0.4; }
-.roster div.me { background: rgba(89, 227, 255, 0.08); border-radius: 6px; }
-.roster i { width: 10px; height: 10px; border-radius: 50%; }
-.roster b { margin-left: auto; color: var(--muted); font-weight: 500; }
-
-.bottom { position: absolute; left: 12px; right: 12px; bottom: 12px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; gap: 12px; pointer-events: none; }
-.left { display: flex; flex-direction: column; gap: 6px; max-width: 420px; }
-.feed { margin: 0; padding: 0; list-style: none; font-size: 13px; display: flex; flex-direction: column; gap: 2px; pointer-events: none; }
-.feed li { background: rgba(0, 0, 0, 0.45); padding: 3px 8px; border-radius: 6px; width: fit-content; max-width: 100%; }
-.feed li.system { color: #b9c6d2; }
-.chat input { width: 100%; background: rgba(0, 0, 0, 0.5); }
-.center { display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .vitals { display: flex; align-items: center; gap: 8px; width: 260px; }
-.vitals .meter { flex: 1; height: 10px; }
-.vitals .hp i { background: #7dff9b; }
+.vitals .g-meter { flex: 1; height: 10px; }
 .abilities { display: flex; gap: 8px; }
-.ability { position: relative; width: 64px; height: 64px; border-radius: 12px; background: var(--panel); border: 2px solid var(--c); display: grid; place-items: center; overflow: hidden; }
+.ability { position: relative; width: 64px; height: 64px; border-radius: 12px; background: var(--g-panel); border: 2px solid var(--c); display: grid; place-items: center; overflow: hidden; }
 .ability span { font-size: 22px; color: var(--c); }
-.ability kbd { position: absolute; top: 3px; left: 5px; font-size: 11px; color: var(--muted); }
-.ability small { position: absolute; bottom: 3px; font-size: 9px; color: var(--muted); max-width: 60px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ability kbd { position: absolute; top: 3px; left: 5px; font-size: 11px; color: var(--g-muted); }
+.ability small { position: absolute; bottom: 3px; font-size: 9px; color: var(--g-muted); max-width: 60px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .ability em { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.65); }
 .ability b { position: absolute; font-size: 15px; }
-.right { justify-self: end; text-align: right; max-width: 280px; }
 
-.banner { position: absolute; top: 26%; left: 50%; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 28px; text-align: center; min-width: 280px; max-width: 560px; }
-.banner h2 { margin: 0 0 6px; font-size: 22px; }
-.banner p { margin: 4px 0; }
-.banner button { margin-top: 10px; background: var(--accent); color: #041018; font-weight: 700; border: none; }
-
-.toast { position: absolute; top: 72px; left: 50%; transform: translateX(-50%); background: #1a2230; border: 1px solid var(--line); padding: 8px 14px; border-radius: 10px; font-size: 14px; white-space: pre-line; max-width: min(640px, 90vw); }
-.netstats { position: absolute; top: 72px; left: 12px; margin: 0; background: rgba(0, 0, 0, 0.72); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: 12px/1.45 ui-monospace, monospace; color: #b9f5c8; pointer-events: none; }
-.feed li.me { font-style: italic; }
-
-.panel { background: #0f151d; color: var(--text); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; width: min(560px, 92vw); max-height: 80vh; }
-.panel::backdrop { background: rgba(0, 0, 0, 0.5); }
-.panel h2 { margin: 0 0 4px; }
-.panel .stack { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-.panel .close { margin-top: 12px; }
-.entry { display: grid; grid-template-columns: 36px 1fr auto auto; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.entry { display: grid; grid-template-columns: 36px 1fr auto auto; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--g-line); }
 .entry .icon { font-size: 22px; color: var(--c); text-align: center; }
-.entry p { margin: 2px 0 0; font-size: 13px; color: var(--muted); }
-.entry small { color: var(--muted); }
-.entry button.on { background: var(--c); color: #041018; border-color: transparent; }
-
-.lobby { position: absolute; inset: 0; display: grid; place-items: center; background: radial-gradient(circle at 50% 40%, rgba(89, 227, 255, 0.12), rgba(5, 8, 12, 0.92) 60%); }
-.lobby .card { width: min(420px, 92vw); background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 26px; display: flex; flex-direction: column; gap: 12px; }
-.lobby h1 { margin: 0; font-size: 34px; letter-spacing: 0.04em; color: var(--accent); }
-.lobby p { margin: 0; color: #b9c6d2; line-height: 1.45; }
-.lobby button { background: var(--accent); color: #041018; font-weight: 700; border: none; padding: 0.7em; }
+.entry p { margin: 2px 0 0; font-size: 13px; color: var(--g-muted); }
+.entry small { color: var(--g-muted); }
+.entry .g-button.on { background: var(--c); color: #041018; border-color: transparent; }

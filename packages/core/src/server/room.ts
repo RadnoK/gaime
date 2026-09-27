@@ -18,6 +18,7 @@ type Job<W extends BaseWorld> = { apply: (world: W, result: unknown, ctx: GameCo
 const TICKET = /^[A-Za-z0-9_-]{16,64}$/;
 const SAVE_EVERY_MS = 2000;
 const EPHEMERAL = 'gaime-ephemeral';
+const BOT = 'gaime-bot';
 const BACKPRESSURE_BYTES = 64 * 1024;
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -61,6 +62,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
     game = game;
     chat = createChat(game as GameDefinition<W, unknown>, {
       ctx: this.ctx,
+      bots: !!game.bot,
       rename: (id, name) => this.rename(id, name),
       pause: (id, paused) => this.engineCommand(id, { type: paused ? '$pause' : '$resume' }),
     });
@@ -142,6 +144,15 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
         }
         this.dirty = true;
       }
+      if (game.bot && !this.world.pause) {
+        for (const player of Object.values(this.world.players)) {
+          if (!player.data[BOT]) continue;
+          try {
+            const input = game.bot(this.world, player.id, this.ctx);
+            if (input !== undefined) { this.playerInputs[player.id] = input; this.inputAt[player.id] = now; }
+          } catch (error) { this.fail(error); break; }
+        }
+      }
       if (!this.world.pause) {
         const dt = Math.min(ms / 1000, 0.1);
         this.world.time += dt;
@@ -209,7 +220,24 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
           work.then(result => { job.result = result; room.jobs.push(job); }, error => { job.error = error instanceof Error ? error : new Error(String(error)); room.jobs.push(job); });
         },
         findPlayer: query => findPlayer(room.world.players, query) as PlayerOf<W> | undefined,
+        addBot: name => room.addBot(name),
+        isBot: playerId => !!room.world.players[playerId]?.data[BOT],
+        command: (playerId, command) => game.command?.(room.world, playerId, command, room.ctx),
       };
+    }
+
+    addBot(name?: string): string {
+      if (!game.bot) throw new Error('This game has no bot() brain (GameDefinition.bot).');
+      const id = `bot-${randomUUID().slice(0, 8)}`;
+      const count = Object.values(this.world.players).filter(p => p.data[BOT]).length;
+      const player = game.createPlayer(this.world, id, name || `Bot ${count + 1}`, this.ctx);
+      player.data[BOT] = true;
+      player.online = true;
+      this.world.players[id] = player;
+      pushFeed(this.world, `🤖 ${player.name} joined the game.`);
+      try { game.onPlayerOnline?.(this.world, player, true, this.ctx); } catch (error) { this.fail(error); }
+      this.dirty = true; this.publishSoon = true;
+      return id;
     }
 
     rename(id: string, raw: string): string | void {
@@ -262,14 +290,16 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
     prepare() {
       this.world.version = runtime().loaded;
       if (!this.frozen && this.world.pause?.reason === 'error') this.world.pause = null;
+      // Bots have no connection to come back with: they are online whenever the room runs.
+      for (const player of Object.values(this.world.players)) if (player.data[BOT]) player.online = true;
       try { game.prepare?.(this.world, this.ctx); } catch (error) { this.fail(error); }
       this.ensureHost();
     }
 
     ensureHost() {
       const current = this.world.hostId ? this.world.players[this.world.hostId] : undefined;
-      if (current?.online) return;
-      const next = Object.values(this.world.players).find(player => player.online);
+      if (current?.online && !current.data[BOT]) return;
+      const next = Object.values(this.world.players).find(player => player.online && !player.data[BOT]);
       this.world.hostId = next?.id ?? null;
     }
 
@@ -325,7 +355,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       if (typeof ticket !== 'string' || !TICKET.test(ticket)) throw new ServerError(400, 'Missing player ticket.');
       const id = this.identities[ticket];
       const existing = id ? this.world.players[id] : undefined;
-      const players = Object.values(this.world.players);
+      const players = Object.values(this.world.players).filter(p => !p.data[BOT]);
       const taken = keepPlayers ? players.filter(p => p.online && p.id !== id).length : players.filter(p => p.id !== id).length;
       if ((!existing || keepPlayers) && taken >= maxPlayers) throw new ServerError(403, `The game is full (at most ${maxPlayers} players).`);
       return { ticket };

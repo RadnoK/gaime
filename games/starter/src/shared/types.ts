@@ -1,4 +1,7 @@
 import type { BasePlayer, BaseWorld, CatalogEntry, FeatureModule, Visual } from '@gaime/core';
+import type { Effect, EffectType } from '@gaime/core/kit';
+
+export type { Effect, EffectType };
 
 // ── World (serialisable, synchronised to every client, stored in checkpoints) ──
 
@@ -31,23 +34,6 @@ export interface Enemy {
   maxHp: number;
   /** Free-form state for `EnemyDef.tick`. Prefix keys with your feature id. */
   data: Record<string, number | string | boolean>;
-}
-
-export type EffectType = 'tracer' | 'pulse' | 'hit' | 'text' | 'spawn';
-
-/** Short-lived visual event. Immutable once emitted; the client animates it by age. */
-export interface Effect {
-  id: number;
-  type: EffectType;
-  time: number;
-  x: number;
-  z: number;
-  /** End point for tracers. */
-  x2?: number;
-  z2?: number;
-  radius?: number;
-  color?: string;
-  text?: string;
 }
 
 export interface Spawn {

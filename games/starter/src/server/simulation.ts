@@ -1,6 +1,7 @@
 import { angleTo, baseWorld, dist, nearest } from '@gaime/core';
+import { addEffect, freeColor, pointInRing, pointOnCircle, pruneEffects, raycast, rayEnd, separate, status, weighted } from '@gaime/core/kit';
 import type { GameContext } from '@gaime/core/server';
-import type { Command, Effect, Enemy, Input, Player, Sim, World } from '../shared/types';
+import type { Command, Enemy, Input, Player, Sim, World } from '../shared/types';
 import { clampToArena, movePlayer, RULES } from '../shared/rules';
 import type { StarterRegistry } from './registry';
 
@@ -15,15 +16,11 @@ export function createWorld(): World {
   };
 }
 
-function spawnPoint(random: () => number) {
-  const angle = random() * Math.PI * 2;
-  const radius = RULES.crystalRadius + 2 + random() * 2;
-  return { x: Math.sin(angle) * radius, z: Math.cos(angle) * radius };
-}
+const CENTER = { x: 0, z: 0 };
+const spawnPoint = (random: () => number) => pointInRing(random, CENTER, RULES.crystalRadius + 2, RULES.crystalRadius + 4);
 
 export function createPlayer(world: World, id: string, name: string, random = Math.random): Player {
-  const used = new Set(Object.values(world.players).map(p => p.color));
-  const color = RULES.palette.find(c => !used.has(c)) ?? RULES.palette[Object.keys(world.players).length % RULES.palette.length];
+  const color = freeColor(Object.values(world.players).map(p => p.color), RULES.palette);
   return {
     id, name, online: true, data: {}, ...spawnPoint(random), angle: 0,
     hp: RULES.playerHp, maxHp: RULES.playerHp, color, respawnAt: 0, kills: 0,
@@ -86,27 +83,25 @@ export function makeSim(world: World, registry: StarterRegistry, ctx: GameContex
       if (!registry.kinds.enemies[enemy]) throw new Error(`Unknown enemy "${enemy}" — define it in the enemies of some feature.`);
       const count = Math.min(200, Math.max(1, Math.floor(options.count ?? 1)));
       for (let i = 0; i < count; i++) {
-        const angle = ctx.random() * Math.PI * 2;
-        const edge = RULES.arenaRadius - 1.5;
+        const edge = pointOnCircle(ctx.random, CENTER, RULES.arenaRadius - 1.5);
         world.spawns.push({
           id: ctx.nextId(), enemy,
           at: world.time + (options.delay ?? 0) + i * (options.interval ?? 0.6),
-          x: options.x ?? Math.sin(angle) * edge,
-          z: options.z ?? Math.cos(angle) * edge,
+          x: options.x ?? edge.x,
+          z: options.z ?? edge.z,
         });
       }
     },
     slow(enemy, factor, seconds) {
-      const active = Number(enemy.data['slow-until'] ?? 0) > world.time;
-      const current = active ? Number(enemy.data['slow-factor'] ?? 1) : 1;
-      enemy.data['slow-factor'] = Math.max(0, Math.min(current, factor));
-      enemy.data['slow-until'] = Math.max(active ? Number(enemy.data['slow-until']) : 0, world.time + seconds);
+      // The strongest active slow wins.
+      const current = status.value(enemy.data, 'slow', world.time, 1);
+      status.apply(enemy.data, 'slow', world.time, seconds, Math.max(0, Math.min(current, factor)));
     },
     moveTowards(entity, target, speed) {
       const d = dist(entity, target);
       if (d < 1e-6) return 0;
       const data = (entity as Partial<Enemy>).data;
-      if (data && Number(data['slow-until'] ?? 0) > world.time) speed *= Number(data['slow-factor'] ?? 1);
+      if (data) speed *= status.value(data, 'slow', world.time, 1);
       const step = Math.min(d, speed * dt);
       entity.angle = angleTo(entity, target);
       entity.x += ((target.x - entity.x) / d) * step;
@@ -114,8 +109,7 @@ export function makeSim(world: World, registry: StarterRegistry, ctx: GameContex
       return d - step;
     },
     effect(type, at, options = {}) {
-      const effect: Effect = { id: ctx.nextId(), type, time: world.time, x: at.x, z: at.z, ...options };
-      world.effects.push(effect);
+      addEffect(world.effects, ctx.nextId(), type, world.time, at, options);
     },
     log: ctx.log,
     emit: ctx.emit,
@@ -132,7 +126,7 @@ export function makeSim(world: World, registry: StarterRegistry, ctx: GameContex
 
 export function step(world: World, registry: StarterRegistry, inputs: Readonly<Record<string, Input>>, dt: number, ctx: GameContext<World>) {
   const sim = makeSim(world, registry, ctx, dt);
-  world.effects = world.effects.filter(effect => world.time - effect.time < RULES.effectSeconds);
+  world.effects = pruneEffects(world.effects, world.time, RULES.effectSeconds);
 
   for (const player of Object.values(world.players)) {
     if (!player.online) continue;
@@ -169,7 +163,7 @@ export function step(world: World, registry: StarterRegistry, inputs: Readonly<R
     if (!def) { delete world.enemies[enemy.id]; continue; }
     if (def.tick) def.tick(sim, enemy); else defaultAi(sim, enemy, def.speed, def.radius, def.damage);
   }
-  separate(Object.values(world.enemies), registry);
+  separate(Object.values(world.enemies), enemy => registry.kinds.enemies[enemy.kind]?.radius ?? 0.5);
 
   if (world.crystal.hp <= 0) {
     world.phase = 'lost';
@@ -200,47 +194,19 @@ export function defaultAi(sim: Sim, enemy: Enemy, speed: number, radius: number,
   else sim.hurtCrystal(damage * sim.dt);
 }
 
-function separate(enemies: Enemy[], registry: StarterRegistry) {
-  for (let i = 0; i < enemies.length; i++) {
-    for (let j = i + 1; j < enemies.length; j++) {
-      const a = enemies[i]; const b = enemies[j];
-      const min = (registry.kinds.enemies[a.kind]?.radius ?? 0.5) + (registry.kinds.enemies[b.kind]?.radius ?? 0.5);
-      const dx = b.x - a.x; const dz = b.z - a.z;
-      const d = Math.hypot(dx, dz);
-      if (d >= min || d < 1e-6) continue;
-      const push = (min - d) / 2;
-      a.x -= (dx / d) * push; a.z -= (dz / d) * push;
-      b.x += (dx / d) * push; b.z += (dz / d) * push;
-    }
-  }
-}
 
-/** Hitscan along the aim direction; the first enemy whose circle crosses the ray takes the hit. */
+/** Hitscan along the aim direction: the first enemy crossing the ray takes the hit. */
 function shoot(sim: Sim, player: Player) {
-  const dx = Math.sin(player.angle);
-  const dz = Math.cos(player.angle);
-  let best: Enemy | undefined;
-  let bestT = RULES.shotRange;
-  for (const enemy of sim.enemies()) {
-    const radius = sim.enemyDef(enemy.kind)?.radius ?? 0.5;
-    const ex = enemy.x - player.x; const ez = enemy.z - player.z;
-    const t = ex * dx + ez * dz;
-    if (t < 0 || t > bestT + radius) continue;
-    const perpendicular = Math.abs(ex * dz - ez * dx);
-    if (perpendicular > radius) continue;
-    best = enemy; bestT = Math.max(0, t - radius * 0.5);
-  }
-  const end = { x: player.x + dx * bestT, z: player.z + dz * bestT };
+  const hit = raycast(player, player.angle, RULES.shotRange, sim.enemies(), enemy => sim.enemyDef(enemy.kind)?.radius ?? 0.5);
+  const end = hit?.point ?? rayEnd(player, player.angle, RULES.shotRange);
   sim.effect('tracer', player, { x2: end.x, z2: end.z, color: player.color });
-  if (best) sim.hurtEnemy(best, RULES.shotDamage, player.id);
+  if (hit) sim.hurtEnemy(hit.item, RULES.shotDamage, player.id);
 }
 
 export function startWave(world: World, registry: StarterRegistry, sim: Sim, wave: number) {
   const eligible = registry.lists.waves.filter(w => (w.minWave ?? 1) <= wave);
   if (!eligible.length) { world.phase = 'lobby'; sim.log('No waves defined — add a feature with "waves".'); return; }
-  const total = eligible.reduce((sum, w) => sum + (w.weight ?? 1), 0);
-  let roll = sim.random() * total;
-  const def = eligible.find(w => (roll -= w.weight ?? 1) < 0) ?? eligible[0];
+  const def = weighted(sim.random, eligible, w => w.weight ?? 1) ?? eligible[0];
   world.wave = wave;
   world.phase = 'fight';
   world.waveName = def.name;
@@ -302,3 +268,27 @@ export function command(world: World, registry: StarterRegistry, playerId: strin
   }
 }
 
+
+// ── bots ──────────────────────────────────────────────────────────────
+
+/**
+ * Brain of `/bot` players: stay near the crystal, face the closest enemy and shoot it,
+ * use the first ability when enemies bunch up. Returns the same Input a client sends.
+ */
+export function botInput(world: World, id: string, ctx: GameContext<World>): Input | undefined {
+  const bot = world.players[id];
+  if (!bot || bot.respawnAt) return undefined;
+  const target = nearest(bot, Object.values(world.enemies), RULES.shotRange);
+  const home = pointOnCircle(() => (Number(bot.id.charCodeAt(4) ?? 0) % 16) / 16, CENTER, RULES.crystalRadius + 5);
+  const goal = target && dist(bot, target) > RULES.shotRange * 0.7 ? target : home;
+  const dx = goal.x - bot.x; const dz = goal.z - bot.z;
+  const far = Math.hypot(dx, dz) > 1;
+  if (target && Object.values(world.enemies).filter(enemy => dist(enemy, bot) < 6).length >= 4) {
+    ctx.command(id, { type: 'cast', slot: 1, x: bot.x, z: bot.z });
+  }
+  return {
+    mx: far ? dx / Math.hypot(dx, dz) : 0, mz: far ? dz / Math.hypot(dx, dz) : 0,
+    ax: target?.x ?? bot.x + Math.sin(bot.angle), az: target?.z ?? bot.z + Math.cos(bot.angle),
+    fire: !!target && world.phase === 'fight',
+  };
+}

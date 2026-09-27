@@ -1,4 +1,4 @@
-import { clamp } from '@gaime/core';
+import { clampToCircle, keepOutOfCircle, moveTopDown } from '@gaime/core/kit';
 import type { Input } from './types';
 
 /** Balance and geometry shared by the server simulation and client prediction. */
@@ -19,27 +19,19 @@ export const RULES = {
   palette: ['#59e3ff', '#ff7a59', '#b0ff59', '#ff59d6', '#ffd659', '#8f7bff', '#59ffb0', '#ff5977'],
 };
 
+const CENTER = { x: 0, z: 0 };
+
 /** Keeps a point inside the arena and outside the crystal. */
 export function clampToArena(point: { x: number; z: number }, radius = RULES.playerRadius) {
-  const d = Math.hypot(point.x, point.z);
-  const max = RULES.arenaRadius - radius;
-  if (d > max) { point.x *= max / d; point.z *= max / d; }
-  const min = RULES.crystalRadius + radius;
-  if (d < min) {
-    const k = d > 1e-6 ? min / d : 0;
-    point.x = d > 1e-6 ? point.x * k : min; point.z = d > 1e-6 ? point.z * k : 0;
-  }
+  clampToCircle(point, RULES.arenaRadius, radius);
+  keepOutOfCircle(point, CENTER, RULES.crystalRadius + radius);
 }
 
 /** Player movement; the client runs the same function to predict its own character. */
 export function movePlayer(player: { x: number; z: number; angle: number }, input: Input, dt: number) {
-  let mx = clamp(input.mx, -1, 1);
-  let mz = clamp(input.mz, -1, 1);
-  const length = Math.hypot(mx, mz);
-  if (length > 1) { mx /= length; mz /= length; }
-  player.x += mx * RULES.playerSpeed * dt;
-  player.z += mz * RULES.playerSpeed * dt;
+  moveTopDown(player, input, RULES.playerSpeed, dt);
   clampToArena(player);
-  const aim = Math.atan2(input.ax - player.x, input.az - player.z);
-  if (Number.isFinite(aim) && Math.hypot(input.ax - player.x, input.az - player.z) > 0.2) player.angle = aim;
+  const dx = input.ax - player.x;
+  const dz = input.az - player.z;
+  if (Math.hypot(dx, dz) > 0.2) player.angle = Math.atan2(dx, dz);
 }

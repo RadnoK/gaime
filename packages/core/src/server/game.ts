@@ -30,6 +30,14 @@ export interface GameContext<W extends BaseWorld> {
   job<T>(work: Promise<T>, apply: (world: W, result: T, ctx: GameContext<W>) => void, fail?: (world: W, error: Error, ctx: GameContext<W>) => void): void;
   /** Case-insensitive name lookup (exact, then unique prefix). */
   findPlayer(nameOrId: string): PlayerOf<W> | undefined;
+  /**
+   * Add a server-controlled player (needs `GameDefinition.bot`). It is created with
+   * `createPlayer`, counts as online, never uses a seat and is driven by `bot()` every tick.
+   */
+  addBot(name?: string): string;
+  isBot(playerId: string): boolean;
+  /** Run `GameDefinition.command` as if `playerId` sent it (bots, scripted events, admin tools). */
+  command(playerId: string, command: { type: string; [key: string]: unknown }): string | void;
 }
 
 export interface ChatCommand<W extends BaseWorld> {
@@ -94,6 +102,11 @@ export interface GameDefinition<W extends BaseWorld, I = unknown> {
   /** Discrete player actions. Return a string to send it back to the player as a notice. */
   command?(world: W, playerId: string, command: { type: string; [key: string]: unknown }, ctx: GameContext<W>): string | void;
 
+  /**
+   * Brain of bot players: called every tick for each bot, returns its input (like a client would send).
+   * Discrete actions: `ctx.command(botId, {...})`. Enables `/bot` and `/bot remove` in chat (host only).
+   */
+  bot?(world: W, botId: string, ctx: GameContext<W>): I | undefined;
   /** RPC: `client.request(name, payload)` resolves with the returned value (or rejects with a thrown error). */
   requests?: Record<string, RequestHandler<W>>;
   /** Chat: extra slash commands (`/name args`) and an optional filter (return null to drop a message). */

@@ -67,7 +67,7 @@ export function gaime(options: GaimeViteOptions = {}): PluginOption[] {
           // keeps @gaime/core inside Vite so its server code hot-reloads with the game.
           alias: [
             { find: /^@gaime\/core$/, replacement: resolve(coreSrc, 'shared/index.ts') },
-            { find: /^@gaime\/core\/(server|client|three|shared|worker)$/, replacement: `${coreSrc}/$1/index.ts` },
+            { find: /^@gaime\/core\/(server|client|three|shared|worker|kit|ui|audio)$/, replacement: `${coreSrc}/$1/index.ts` },
           ],
         },
         define: {

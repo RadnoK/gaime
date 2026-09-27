@@ -2,7 +2,7 @@ import { clamp } from '@gaime/core';
 import { defineGame } from '@gaime/core/server';
 import type { Command, Input, World } from '../shared/types';
 import { registry } from './registry';
-import { command, createPlayer, createWorld, makeSim, prepareWorld, resetRound, startWave, step } from './simulation';
+import { botInput, command, createPlayer, createWorld, makeSim, prepareWorld, resetRound, startWave, step } from './simulation';
 import { tactics, threatInput } from './tactics';
 
 export const game = defineGame<World, Input>({
@@ -35,6 +35,8 @@ export const game = defineGame<World, Input>({
   },
   step: (world, inputs, dt, ctx) => step(world, registry, inputs, dt, ctx),
   command: (world, playerId, payload, ctx) => command(world, registry, playerId, payload as Command, ctx),
+  // `/bot` in chat (host) adds a teammate driven by this function.
+  bot: botInput,
 
   // RPC: `net.request('scoreboard')` on the client.
   requests: {

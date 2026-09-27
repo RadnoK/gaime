@@ -7,7 +7,7 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: /^@gaime\/core$/, replacement: `${core}/shared/index.ts` },
-      { find: /^@gaime\/core\/(server|client|three|shared)$/, replacement: `${core}/$1/index.ts` },
+      { find: /^@gaime\/core\/(server|client|three|shared|worker|kit|ui|audio)$/, replacement: `${core}/$1/index.ts` },
     ],
   },
   test: {
