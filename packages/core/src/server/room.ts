@@ -308,9 +308,16 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
     welcome(client: Client) {
       const id = this.sessions[client.sessionId];
       if (!id) return;
-      const snapshot = { world: projectWorld(this.world, net), revision: ++this.revision };
+      const snapshot = { world: this.viewFor(projectWorld(this.world, net), id), revision: ++this.revision };
       this.snapshots.set(client.sessionId, snapshot);
       client.send('welcome', { id, game: game.name, version: runtime().loaded, protocol: PROTOCOL_VERSION, revision: snapshot.revision, host: this.world.hostId === id, world: snapshot.world } satisfies Welcome & { world: W });
+    }
+
+    /** `GameDefinition.view` applied to a projection (never to the authoritative world). */
+    viewFor(projection: W, playerId: string): W {
+      if (!game.view) return projection;
+      try { return game.view(projection, playerId); }
+      catch (error) { console.error('[gaime] view', error); return projection; }
     }
 
     publish() {
@@ -328,6 +335,14 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
         const previous = this.snapshots.get(client.sessionId);
         if (!previous) { this.welcome(client); continue; }
         snapshot ??= { world: projectWorld(this.world, net), revision: ++this.revision };
+        if (game.view) {
+          // Per-player views cannot share bytes: diff each client against its own last view.
+          const own = { world: this.viewFor(snapshot.world, this.sessions[client.sessionId]), revision: snapshot.revision };
+          const patch = diffWorld(previous, own, net);
+          client.send('patch', patch);
+          this.snapshots.set(client.sessionId, own);
+          continue;
+        }
         let bytes = encoded.get(previous);
         if (!bytes) {
           const patch = diffWorld(previous, snapshot, net);

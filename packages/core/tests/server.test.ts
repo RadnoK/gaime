@@ -4,15 +4,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@colyseus/sdk';
 import { baseWorld, type BasePlayer, type BaseWorld } from '../src/shared';
-import { createGameServer, defineGame } from '../src/server';
+import { adminToken, createGameServer, defineGame } from '../src/server';
 import { smoke } from '../../host/src/smoke.mjs';
 
-type World = BaseWorld<BasePlayer & { x: number }> & { ticks: number; crash: boolean };
+type World = BaseWorld<BasePlayer & { x: number }> & { ticks: number; crash: boolean; secrets: Record<string, string> };
 
 const game = defineGame<World, { dx: number }>({
   name: 'test-game',
-  createWorld: () => ({ ...baseWorld(1), ticks: 0, crash: false }),
-  createPlayer: (_world, id, name) => ({ id, name, online: true, data: {}, x: 0 }),
+  createWorld: () => ({ ...baseWorld(1), ticks: 0, crash: false, secrets: {} }),
+  createPlayer: (world, id, name) => { world.secrets[id] = `secret of ${name}`; return { id, name, online: true, data: {}, x: 0 }; },
+  bot: () => ({ dx: 1 }),
+  admin: { double: { description: 'double the ticks', run: world => { world.ticks *= 2; return { ticks: world.ticks }; } } },
+  // Everyone sees only their own secret.
+  view: (world, playerId) => ({ ...world, secrets: world.secrets[playerId] ? { [playerId]: world.secrets[playerId] } : {} }),
   parseInput: raw => (Number.isFinite((raw as { dx?: number })?.dx) ? { dx: (raw as { dx: number }).dx } : undefined),
   step(world, inputs, dt) {
     if (world.crash) throw new Error('boom');
@@ -112,6 +116,49 @@ describe('game server', () => {
     room.send('command', { type: 'later' });
     await until(() => events.length === 1 && notices.includes('job 42'));
     expect(events[0]).toEqual({ name: 'sound', data: { kind: 'boom' } });
+    await room.leave();
+  }, 20000);
+
+  test('per-player views hide other players\' secrets in snapshots and patches', async () => {
+    await boot();
+    const { roomId } = await (await fetch(`${url}/gaime/room`)).json();
+    const join = async (name: string, ticket: string) => {
+      const room = await new Client(url).joinById(roomId, { name, ticket });
+      const state: { id: string; secrets: Record<string, string> } = { id: '', secrets: {} };
+      room.onMessage('welcome', message => { state.id = message.id; state.secrets = message.world.secrets; });
+      room.onMessage('patch', patch => { if (patch.values?.secrets) state.secrets = patch.values.secrets; });
+      room.onMessage('notice', () => {});
+      await until(() => !!state.id);
+      return { room, state };
+    };
+    const a = await join('Ann', 'a'.repeat(24));
+    const b = await join('Ben', 'b'.repeat(24));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(a.state.secrets).toEqual({ [a.state.id]: 'secret of Ann' });
+    expect(b.state.secrets).toEqual({ [b.state.id]: 'secret of Ben' });
+    await a.room.leave(); await b.room.leave();
+  }, 20000);
+
+  test('bots from /bot move by their brain; the admin API needs the token', async () => {
+    await boot();
+    const { roomId } = await (await fetch(`${url}/gaime/room`)).json();
+    const room = await new Client(url).joinById(roomId, { name: 'Host', ticket: 'h'.repeat(24) });
+    room.onMessage('welcome', () => {}); room.onMessage('patch', () => {}); room.onMessage('notice', () => {});
+    await new Promise(resolve => setTimeout(resolve, 200));
+    room.send('command', { type: '$chat', text: '/bot Robo' });
+    const admin = async (action: string, body?: object, token = adminToken()) => {
+      const response = await fetch(`${url}/gaime/admin/${action}`, { method: body ? 'POST' : 'GET', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+      return { status: response.status, body: await response.json() };
+    };
+    await until(async () => (await admin('players')).body.some((p: { name: string }) => p.name === 'Robo'));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const world = (await admin('world')).body as World;
+    const bot = Object.values(world.players).find(p => p.name === 'Robo')!;
+    expect(bot.data['gaime-bot']).toBe(true);
+    expect(bot.x).toBeGreaterThan(0);
+    expect((await admin('players', undefined, 'wrong')).status).toBe(401);
+    expect((await admin('command', { name: 'double', args: [] })).body).toHaveProperty('ticks');
+    expect((await admin('command', { name: 'nope', args: [] })).status).toBe(400);
     await room.leave();
   }, 20000);
 

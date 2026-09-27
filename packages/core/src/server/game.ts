@@ -95,6 +95,13 @@ export interface GameDefinition<W extends BaseWorld, I = unknown> {
   /** The player is about to be deleted from the world. */
   onPlayerRemoved?(world: W, player: PlayerOf<W>, ctx: GameContext<W>): void;
 
+  /**
+   * What one player may see: return a copy of `world` without other players' secrets
+   * (cards in hand, fog of war). Receives the network projection — never mutate it,
+   * return a new object for every key you change: `{ ...world, hands: { [id]: world.hands[id] } }`.
+   * Costs one diff per client per publish instead of one shared diff.
+   */
+  view?(world: W, playerId: string): W;
   /** Validate and normalise raw client input. Return undefined to ignore it. */
   parseInput(raw: unknown): I | undefined;
   /** Advance the simulation. `dt` in seconds. Not called while paused. */
