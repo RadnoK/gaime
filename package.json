@@ -1,0 +1,34 @@
+{
+  "name": "gaime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Framework for quickly building multiplayer browser games developed together with AI.",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "games/*"
+  ],
+  "scripts": {
+    "dev": "node scripts/game.mjs dev",
+    "build": "node scripts/game.mjs build",
+    "host": "node scripts/game.mjs host",
+    "smoke": "node scripts/game.mjs smoke",
+    "load": "node scripts/game.mjs load",
+    "check": "tsc --noEmit -p . && npm run check --workspaces --if-present",
+    "test": "vitest run",
+    "new-game": "node packages/host/bin/gaime.mjs new",
+    "gaime": "node packages/host/bin/gaime.mjs",
+    "deploy": "git push origin main"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.2",
+    "@types/three": "^0.186.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
+  }
+}

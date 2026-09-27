@@ -1,0 +1,13 @@
+{
+  "name": "@gaime/host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "gaime CLI: git-driven deploy supervisor (live HMR or production releases), rollback, checkpoint snapshots, admin commands, smoke and load tests.",
+  "bin": {
+    "gaime": "./bin/gaime.mjs"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

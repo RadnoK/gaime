@@ -1,0 +1,28 @@
+# Without Docker: the supervisor straight on the host (Node ≥ 22.12, git).
+#   /srv/gaime/<game>/repo   clone of the repository (deploy key in ~/.ssh or GIT_SSH_COMMAND)
+#   /srv/gaime/<game>/.env   GAIME_MODE, GAIME_PORT (different per game), GAIME_PUBLIC_URL, …
+#   systemctl enable --now gaime@<game>
+# Put Caddy/nginx in front of 127.0.0.1:$GAIME_PORT (WebSockets on).
+[Unit]
+Description=gaime: game %i (supervisor + automatic deploys)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gaime
+Group=gaime
+WorkingDirectory=/srv/gaime/%i/repo/games/%i
+EnvironmentFile=/srv/gaime/%i/.env
+Environment=GAIME_DATA_DIR=/srv/gaime/%i/data
+Environment=NPM_CONFIG_CACHE=/srv/gaime/%i/npm-cache
+ExecStart=/usr/bin/env node /srv/gaime/%i/repo/packages/host/bin/gaime.mjs host
+Restart=always
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

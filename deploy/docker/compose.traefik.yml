@@ -1,0 +1,18 @@
+# HTTPS through an existing Traefik (Docker provider) on the server.
+# .env: COMPOSE_FILE=compose.yml:compose.traefik.yml
+services:
+  gateway:
+    networks: [internal, edge]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${EDGE_NETWORK:-edge}"
+      - "traefik.http.routers.gaime-${GAME}.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.gaime-${GAME}.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.gaime-${GAME}.tls=true"
+      - "traefik.http.routers.gaime-${GAME}.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.services.gaime-${GAME}.loadbalancer.server.port=8080"
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-edge}

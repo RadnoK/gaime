@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.gaime/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+test-results/
+output/
+.playwright-cli/
+.devmode.json
+.playwright-mcp/

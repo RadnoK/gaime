@@ -1,0 +1,7 @@
+{$DOMAIN} {
+	encode zstd gzip
+	header X-Content-Type-Options nosniff
+	header Referrer-Policy strict-origin-when-cross-origin
+	# WebSockets (game + Vite HMR) pass through reverse_proxy automatically.
+	reverse_proxy gateway:8080
+}

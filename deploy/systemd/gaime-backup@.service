@@ -1,0 +1,7 @@
+[Unit]
+Description=gaime: checkpoint backup of game %i
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/bin/sh /srv/gaime/backup.sh /srv/gaime/%i 3

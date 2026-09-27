@@ -1,0 +1,74 @@
+# One game on one server. Copied to /srv/gaime/<game>/compose.yml by deploy/install.sh.
+# Settings live in /srv/gaime/<game>/.env (see deploy/docker/env.example).
+#
+#   game     node:24 image running the gaime supervisor from the repo clone: it follows
+#            origin/main every few seconds and deploys each commit (live HMR or release builds).
+#   gateway  nginx that stays up while the game restarts: serves the published frontend
+#            (release mode), proxies everything else incl. WebSockets and Vite HMR (live mode),
+#            answers 503 + Retry-After during a restart, optional basic auth.
+#
+# Public HTTPS: add compose.traefik.yml (existing Traefik) or compose.caddy.yml (own Caddy).
+name: gaime-${GAME:?set GAME in .env}
+
+services:
+  game:
+    image: node:24-bookworm
+    user: "1000:1000"
+    init: true
+    restart: unless-stopped
+    working_dir: /app/games/${GAME}
+    command: ["node", "/app/packages/host/bin/gaime.mjs", "host"]
+    volumes:
+      - ./repo:/app
+      - ./data:/data
+      - ./ssh:/run/git-ssh:ro
+    environment:
+      HOME: /tmp
+      NPM_CONFIG_CACHE: /app/.gaime/npm-cache
+      GAIME_MODE: ${GAIME_MODE:-live}
+      GAIME_PORT: "5173"
+      GAIME_DATA_DIR: /data
+      GAIME_PUBLIC_URL: ${GAIME_PUBLIC_URL:-https://${DOMAIN:?set DOMAIN in .env}}
+      GAIME_BRANCH: ${GAIME_BRANCH:-main}
+      GAIME_POLL_MS: ${GAIME_POLL_MS:-3000}
+      GAIME_GATES: ${GAIME_GATES:-auto}
+      GAIME_ADMIN_TOKEN: ${GAIME_ADMIN_TOKEN:-}
+      GIT_SSH_COMMAND: >-
+        ssh -i /run/git-ssh/deploy-key
+        -o UserKnownHostsFile=/run/git-ssh/known_hosts
+        -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/health',{signal:AbortSignal.timeout(2500)}).then(async r=>{if(!r.ok||!(await r.json()).ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 180s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    networks: [internal]
+
+  gateway:
+    image: nginxinc/nginx-unprivileged:alpine
+    restart: unless-stopped
+    depends_on: [game]
+    volumes:
+      - ./repo/.gaime/${GAME}/public:/usr/share/nginx/html:ro
+      - ./gateway.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./auth:/etc/nginx/auth:ro
+    ports:
+      # Local port for a reverse proxy running on the host itself (nginx, Caddy, cloudflared…).
+      - "${GATEWAY_BIND:-127.0.0.1:8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/gateway-health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    networks: [internal]
+
+networks:
+  internal: {}

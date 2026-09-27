@@ -1,0 +1,19 @@
+# HTTPS with its own Caddy (automatic Let's Encrypt). Needs ports 80 and 443 free on the server.
+# .env: COMPOSE_FILE=compose.yml:compose.caddy.yml
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [gateway]
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [internal]
+
+volumes:
+  caddy-data: {}
+  caddy-config: {}

@@ -1,0 +1,21 @@
+{
+  "name": "starter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Crystal — co-op crystal defense. The example game and template for new gaime games.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --app",
+    "start": "node dist/server/server.mjs",
+    "check": "tsc --noEmit -p .",
+    "test": "vitest run --root ../.. games/starter",
+    "host": "gaime host",
+    "smoke": "gaime smoke",
+    "load": "gaime load --input '{\"mx\":\"$rand\",\"mz\":\"$rand\",\"ax\":\"$rand*25\",\"az\":\"$rand*25\",\"fire\":\"$bool\"}'"
+  },
+  "dependencies": {
+    "@gaime/core": "*",
+    "@gaime/host": "*"
+  }
+}

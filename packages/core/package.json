@@ -1,0 +1,19 @@
+{
+  "name": "@gaime/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "gaime engine: authoritative Colyseus server, delta sync, checkpoints, hot reload, client and Three.js helpers.",
+  "exports": {
+    ".": "./src/shared/index.ts",
+    "./server": "./src/server/index.ts",
+    "./client": "./src/client/index.ts",
+    "./three": "./src/three/index.ts",
+    "./vite": "./src/vite/index.ts"
+  },
+  "dependencies": {
+    "@colyseus/sdk": "^0.18.4",
+    "colyseus": "^0.18.8",
+    "three": "^0.186.1"
+  }
+}
