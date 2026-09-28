@@ -38,6 +38,26 @@ export interface GameContext<W extends BaseWorld, E extends EventMap = EventMap,
   isolate<T>(owner: string, run: () => T): T | undefined;
   /** Whether a module is currently disabled after an error (until the next code load). */
   disabled(owner: string): boolean;
+  /**
+   * A value derived from the world that is not saved (a physics world, a navigation mesh, a cache):
+   * created on first use, kept for the lifetime of the loaded code, recreated after a hot reload.
+   * `dispose` runs when the code is replaced.
+   */
+  resource<T>(key: string, create: () => T, dispose?: (value: T) => void): T;
+  /**
+   * Entities of a `spatial` collection within `radius` of `at` (current positions, exact distance),
+   * from the engine's shared index — rebuilt at most once per tick for every module together.
+   * Entities added in this tick show up from the next one (or after `reindex`).
+   */
+  near<T extends { x: number; z: number }>(collection: string, at: { x: number; z: number }, radius: number, filter?: (item: T) => boolean): T[];
+  /** The closest entity of a `spatial` collection within `radius` (default: the collection's `maxRadius`). */
+  nearest<T extends { x: number; z: number }>(collection: string, at: { x: number; z: number }, radius?: number, filter?: (item: T) => boolean): T | undefined;
+  /** Rebuild a spatial index now (after adding many entities that must be found in the same tick). */
+  reindex(collection: string): void;
+  /** The room this world lives in: its id, and the invite code of a private match. */
+  readonly room: { id: string; code?: string };
+  /** Stop (or allow again) new players from joining this room — e.g. while a match runs. Matches mode only. */
+  lockRoom(locked: boolean): void;
   /** Message visible to everyone in the world feed. */
   log(text: string): void;
   /** Private toast for one player. */
@@ -92,6 +112,25 @@ export interface AdminCommand<W extends BaseWorld> {
 
 export type RequestHandler<W extends BaseWorld> = (world: W, playerId: string, payload: unknown, ctx: GameContext<W>) => unknown | Promise<unknown>;
 
+export interface SpatialOptions {
+  /** Grid cell size in world units. Default 4 (about the largest query radius works well). */
+  cell?: number;
+  /** How far an entity may move within a tick and still be found (index built earlier in the tick). Default 1. */
+  margin?: number;
+  /** Default radius for `nearest`. Default Infinity. */
+  maxRadius?: number;
+}
+
+export type RoomsConfig =
+  | { mode: 'shared' }
+  | {
+    mode: 'matches';
+    /** Players per room (humans; bots do not count). */
+    size: number;
+    /** Allow `?code=`/`createPrivate` invite-only rooms. Default true. */
+    private?: boolean;
+  };
+
 export interface GameDefinition<W extends BaseWorld, I = unknown, S = any, E extends EventMap = EventMap, M extends ModifierMap = ModifierMap> extends Behaviour<S, E, M> {
   /** Room name, checkpoint name and browser storage prefix. Lowercase, stable. */
   name: string;
@@ -136,6 +175,29 @@ export interface GameDefinition<W extends BaseWorld, I = unknown, S = any, E ext
    * Costs one diff per client per publish instead of one shared diff.
    */
   view?(world: W, playerId: string): W;
+  /**
+   * Collections the engine keeps a spatial index for (`ctx.near` / `ctx.nearest`): top-level
+   * `Record<id, { x, z }>` keys of the world, e.g. `{ enemies: { cell: 4 }, players: {} }`.
+   */
+  spatial?: Record<string, SpatialOptions>;
+  /**
+   * Time budget per module. A module whose systems and handlers cost more than `moduleMs` per tick
+   * (averaged over a second) gets its systems throttled (every 2nd, 4th, 8th tick) until it
+   * recovers; its event handlers keep running. Default: on, 20% of the tick.
+   */
+  budget?: { moduleMs?: number; enabled?: boolean };
+  /**
+   * `shared` (default): one room, one persistent world for everyone.
+   * `matches`: many rooms of up to `size` players each (sessions, rounds, private games with a code);
+   * a room is created when needed and disappears when empty. See docs/ROOMS.md.
+   */
+  rooms?: RoomsConfig;
+  /**
+   * Flight recorder: keep the last minutes of inputs and commands so a session can be replayed
+   * deterministically (`replay()` in tests). Saved automatically when the game pauses on an error or
+   * a module is switched off, and with `gaime replay`. Default: on, 10 minutes.
+   */
+  record?: { enabled?: boolean; minutes?: number };
   /** Validate and normalise raw client input. Return undefined to ignore it. */
   parseInput(raw: unknown): I | undefined;
   /**

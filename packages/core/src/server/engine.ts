@@ -3,6 +3,7 @@ import { findPlayer, hydrate, nextId, pushFeed } from '../shared/world';
 import { resolveNetwork } from '../shared/net';
 import { collectBehaviour, type CommandHandler, type EventHandler, type Modifier, type Owned, type SystemDef, type SystemPhase } from '../shared/registry';
 import { addTimer, cancelTimer, cancelTimers, countTimers, createSchedule, takeDue, timerLeft } from '../shared/schedule';
+import { SpatialHash } from '../kit/spatial';
 import type { GameContext, GameDefinition } from './game';
 import { createChat } from './chat';
 
@@ -24,6 +25,10 @@ export interface EngineHost {
   changed?(): void;
   /** Time spent in one system / handler / command, for `/gaime/stats`. */
   profile?(name: string, ms: number): void;
+  /** The room this engine runs in (id and invite code). Default `{ id: 'local' }`. */
+  room?: { id: string; code?: string };
+  /** `ctx.lockRoom` — stop or allow joins (matches mode). */
+  lockRoom?(locked: boolean): void;
   /** Every dispatched bus event (tests record them). */
   observe?(event: string, data: unknown): void;
   random?: () => number;
@@ -34,6 +39,8 @@ export interface EngineHost {
 type Command = { type: string; [key: string]: unknown };
 type Job<W extends BaseWorld> = { apply: (world: W, result: unknown, ctx: GameContext<W>) => void; fail?: (world: W, error: Error, ctx: GameContext<W>) => void; result?: unknown; error?: Error };
 type RunningSystem = { owner: string; def: SystemDef; name: string; next: number; last: number };
+type Positioned = { id?: string; x: number; z: number };
+type Index = { hash: SpatialHash<Positioned>; tick: number; margin: number; maxRadius: number };
 
 const BOT = 'gaime-bot';
 /** Events in one dispatch cycle before the engine calls it a storm (a handler triggering itself). */
@@ -85,6 +92,8 @@ export class Engine<W extends BaseWorld, I = unknown> {
   private depth = 0;
   private eventsThisTick = 0;
   private sim: { key: string; value: unknown } | undefined;
+  private readonly resources = new Map<string, { value: unknown; dispose?: (value: any) => void }>();
+  private readonly indexes = new Map<string, Index>();
 
   constructor(readonly game: GameDefinition<W, I>, readonly host: EngineHost, world?: W) {
     this.world = world ?? game.createWorld();
@@ -456,6 +465,77 @@ export class Engine<W extends BaseWorld, I = unknown> {
     this.ensureHost();
   }
 
+  // ── resources and spatial indexes ─────────────────────────────────
+
+  resource<T>(key: string, create: () => T, dispose?: (value: T) => void): T {
+    let entry = this.resources.get(key);
+    if (!entry) { entry = { value: create(), dispose }; this.resources.set(key, entry); }
+    return entry.value as T;
+  }
+
+  /** The code is being replaced (hot reload, shutdown): release resources. */
+  dispose() {
+    for (const [key, entry] of this.resources) {
+      try { entry.dispose?.(entry.value); } catch (error) { console.error(`[gaime] dispose ${key}`, error); }
+    }
+    this.resources.clear();
+    this.indexes.clear();
+  }
+
+  private index(collection: string, force = false): Index {
+    const options = this.game.spatial?.[collection];
+    if (!options) throw new Error(`"${collection}" is not a spatial collection — add it to GameDefinition.spatial.`);
+    let index = this.indexes.get(collection);
+    if (!index) {
+      index = { hash: new SpatialHash<Positioned>(options.cell ?? 4), tick: -1, margin: options.margin ?? 1, maxRadius: options.maxRadius ?? Infinity };
+      this.indexes.set(collection, index);
+    }
+    if (force || index.tick !== this.world.tick) {
+      const started = performance.now();
+      const items = (this.world as unknown as Record<string, Record<string, Positioned> | undefined>)[collection];
+      index.hash.rebuild(items ? Object.values(items) : []);
+      index.tick = this.world.tick;
+      this.host.profile?.(`spatial ${collection}`, performance.now() - started);
+    }
+    return index;
+  }
+
+  near<T extends Positioned>(collection: string, at: { x: number; z: number }, radius: number, filter?: (item: T) => boolean): T[] {
+    const index = this.index(collection);
+    const items = (this.world as unknown as Record<string, Record<string, Positioned>>)[collection] ?? {};
+    // The index may be a tick old: search a little wider, then check the live entities exactly.
+    return index.hash.query(at, radius + index.margin).filter(item => {
+      if (item.id !== undefined && items[item.id] !== item) return false;
+      const dx = item.x - at.x; const dz = item.z - at.z;
+      return dx * dx + dz * dz <= radius * radius && (!filter || filter(item as T));
+    }) as T[];
+  }
+
+  nearest<T extends Positioned>(collection: string, at: { x: number; z: number }, radius?: number, filter?: (item: T) => boolean): T | undefined {
+    const limit = radius ?? this.index(collection).maxRadius;
+    if (Number.isFinite(limit)) {
+      let best: T | undefined; let bestD = Infinity;
+      for (const item of this.near<T>(collection, at, limit, filter)) {
+        const d = (item.x - at.x) ** 2 + (item.z - at.z) ** 2;
+        if (d < bestD) { bestD = d; best = item; }
+      }
+      return best;
+    }
+    // Unbounded: a few widening rings through the index, then a plain scan (a huge ring would visit empty cells).
+    const cell = this.game.spatial![collection].cell ?? 4;
+    for (const r of [cell, cell * 4, cell * 16]) {
+      const found = this.nearest<T>(collection, at, r, filter);
+      if (found) return found;
+    }
+    let best: T | undefined; let bestD = Infinity;
+    for (const item of Object.values((this.world as unknown as Record<string, Record<string, T>>)[collection] ?? {})) {
+      if (filter && !filter(item)) continue;
+      const d = (item.x - at.x) ** 2 + (item.z - at.z) ** 2;
+      if (d < bestD) { bestD = d; best = item; }
+    }
+    return best;
+  }
+
   // ── context ───────────────────────────────────────────────────────
 
   private context(): GameContext<W> {
@@ -498,6 +578,12 @@ export class Engine<W extends BaseWorld, I = unknown> {
       timers: prefix => countTimers(schedule(), prefix),
       isolate: (owner, run) => engine.isolate(owner, run),
       disabled: owner => !!engine.disabledModules[owner],
+      resource: (key, create, dispose) => engine.resource(key, create, dispose),
+      near: (collection, at, radius, filter) => engine.near(collection, at, radius, filter),
+      nearest: (collection, at, radius, filter) => engine.nearest(collection, at, radius, filter),
+      reindex: collection => { engine.index(collection, true); },
+      get room() { return engine.host.room ?? { id: 'local' }; },
+      lockRoom: locked => engine.host.lockRoom?.(locked),
     };
     return ctx;
   }
