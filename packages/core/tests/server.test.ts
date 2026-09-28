@@ -27,6 +27,7 @@ const game = defineGame<World, { dx: number }>({
     if (command.type === 'crash') world.crash = true;
     if (command.type === 'ping') return 'pong';
     if (command.type === 'boom') ctx.emit('sound', { kind: 'boom' });
+    if (command.type === 'burst') { for (let i = 0; i < 3; i++) ctx.emit('pop', i); ctx.after(0.1, 'later.done', { ok: true }); }
     if (command.type === 'later') ctx.job(Promise.resolve(41), (w, value) => { w.ticks = -1000; ctx.notify(id, `job ${value + 1}`); });
     if (command.type === 'explode') throw new Error('kaboom');
     if (command.type === 'relay') return `relayed: ${ctx.command(id, { type: 'explode' })}`;
@@ -36,6 +37,8 @@ const game = defineGame<World, { dx: number }>({
     broken: () => { throw new Error('not this time'); },
   },
   chat: { commands: { roll: { description: 'roll a die', run: () => 'rolled a 6' } } },
+  network: { events: ['later.done'] },
+  systems: [{ id: 'count', every: 0.5, run: () => {} }],
 });
 
 let data: string;
@@ -200,6 +203,28 @@ describe('game server', () => {
     await until(() => thief.notices.some(text => /taken/.test(text)));
     expect(await names()).toEqual(['Ann', 'Bob']);
     await thief.room.leave(); await ann.room.leave();
+  }, 20000);
+
+  test('protocol 3 clients get one batched message per tick; timers fire forwarded events; stats show the parts', async () => {
+    await boot();
+    const { roomId } = await (await fetch(`${url}/gaime/room`)).json();
+    const room = await new Client(url).joinById(roomId, { name: 'B', ticket: 'b'.repeat(24), protocol: 3 });
+    const batches: Array<Array<[string, unknown]>> = [];
+    let welcomed = false;
+    room.onMessage('welcome', () => { welcomed = true; });
+    room.onMessage('patch', () => {});
+    room.onMessage('events', list => batches.push(list));
+    room.onMessage('event', () => { throw new Error('a protocol 3 client must not get single events'); });
+    await until(() => welcomed);
+    room.send('command', { type: 'burst' });
+    await until(() => batches.flat().some(([name]) => name === 'later.done'));
+    expect(batches[0]).toEqual([['pop', 0], ['pop', 1], ['pop', 2]]);
+    expect(batches.flat()).toContainEqual(['later.done', { ok: true }]);
+    await new Promise(resolve => setTimeout(resolve, 600));
+    const stats = await (await fetch(`${url}/gaime/stats`)).json() as { parts: Array<{ name: string }>; engine: { events: number; timers: number } };
+    expect(stats.parts.map(part => part.name)).toEqual(expect.arrayContaining(['game/step', 'game/count']));
+    expect(stats.engine.timers).toBeGreaterThanOrEqual(1);
+    await room.leave();
   }, 20000);
 
   test('/gaime/stats can be read repeatedly without resetting the event-loop measurements', async () => {

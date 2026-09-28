@@ -1,7 +1,7 @@
 import { Client, type Room } from '@colyseus/sdk';
 import type { BaseWorld, Welcome } from '../shared/types';
 import { CLOSE_REMOVED, CLOSE_REPLACED } from '../shared/types';
-import type { EngineCommand, EventMessage, ResponseMessage } from '../shared/protocol';
+import { JOIN_PROTOCOL, PROTOCOL_VERSION, type EngineCommand, type EventMessage, type ResponseMessage } from '../shared/protocol';
 import { applyWorldPatch, InputGate, type WorldPatch, type WorldSnapshot } from '../shared/net';
 
 export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'full' | 'replaced' | 'removed' | 'error';
@@ -173,7 +173,7 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
         const response = await fetch(this.roomUrl, { cache: 'no-store' });
         if (!response.ok) throw new Error(`Game server unavailable (${response.status}).`);
         const { roomId } = await response.json() as { roomId: string };
-        room = await this.sdk.joinById(roomId, { name: this.name, ticket: this.ticket });
+        room = await this.sdk.joinById(roomId, { name: this.name, ticket: this.ticket, [JOIN_PROTOCOL]: PROTOCOL_VERSION });
       }
       if (this.stopped) { room.reconnection.enabled = false; void room.leave(true).catch(() => {}); return; }
       this.attach(room);
@@ -240,6 +240,11 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
     });
     this.listen<EventMessage>(room, 'event', message => {
       if (mine()) for (const listener of this.listeners.event) listener(message.name, message.data);
+    });
+    // Protocol 3: every event of one server tick in one message, in order.
+    this.listen<Array<[string, unknown]>>(room, 'events', list => {
+      if (!mine() || !Array.isArray(list)) return;
+      for (const [name, data] of list) for (const listener of this.listeners.event) listener(name, data);
     });
     this.listen<ResponseMessage>(room, 'response', message => {
       const pending = this.pending.get(message.id);

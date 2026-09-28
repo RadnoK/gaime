@@ -1,10 +1,11 @@
 import type { BasePlayer, BaseWorld, FeedItem } from './types';
+import { createSchedule } from './schedule';
 
 export const FEED_LIMIT = 40;
 
 /** Engine-owned part of a new world. Spread it into your `createWorld()`. */
 export function baseWorld(schema: number): Omit<BaseWorld, 'players'> & { players: Record<string, never> } {
-  return { schema, version: 'LOCAL', time: 0, pause: null, hostId: null, players: {}, feed: [], seq: 0 };
+  return { schema, version: 'LOCAL', time: 0, tick: 0, pause: null, hostId: null, players: {}, feed: [], seq: 0, schedule: createSchedule() };
 }
 
 export function nextId(world: BaseWorld): number {

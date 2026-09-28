@@ -15,7 +15,8 @@ export { createRoomClass } from './room';
 export { readCheckpoint, saveCheckpoint, checkpointPath } from './persistence';
 export { runtime, codeVersion } from './runtime';
 export { workerPool, WorkerPool, type PoolOptions, type PoolStats } from './workers';
-export { testContext } from './testing';
+export { testContext, testGame, type TestGameOptions } from './testing';
+export { Engine, type EngineHost } from './engine';
 
 /** Token for `/gaime/admin/*`: GAIME_ADMIN_TOKEN, or a random one kept in the data directory. */
 export function adminToken(): string {
@@ -36,7 +37,7 @@ export function adminToken(): string {
  * `/gaime/admin/*` (operator API for the `gaime` CLI, token required).
  * In production builds it also serves `dist/client`.
  */
-export function createGameServer<W extends BaseWorld, I>(game: GameDefinition<W, I>) {
+export function createGameServer<W extends BaseWorld, I>(game: GameDefinition<W, I, any, any>) {
   // Evaluated again on every hot reload: this is how the supervisor learns the new code is live.
   markLoaded(game.name);
   closeStalePools();
@@ -58,6 +59,7 @@ export function createGameServer<W extends BaseWorld, I>(game: GameDefinition<W,
         const status = runtime();
         res.set('Cache-Control', 'no-store').json({
           ok: !status.error, game: status.game, version: status.loaded, error: status.error,
+          ...(Object.keys(status.disabled).length ? { disabled: status.disabled } : {}),
           uptime: Math.round((Date.now() - status.startedAt) / 1000),
         } satisfies Health);
       });

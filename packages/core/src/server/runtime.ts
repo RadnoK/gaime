@@ -16,6 +16,8 @@ interface RuntimeStatus {
   /** Version of the code that is loaded right now. */
   loaded: string;
   error: string | null;
+  /** Modules disabled by the live engine (module id → message). */
+  disabled: Record<string, string>;
   startedAt: number;
 }
 
@@ -23,7 +25,9 @@ const KEY = Symbol.for('gaime.runtime');
 const store = globalThis as unknown as Record<symbol, RuntimeStatus | undefined>;
 
 export function runtime(): RuntimeStatus {
-  return store[KEY] ??= { game: '', loaded: 'LOCAL', error: null, startedAt: Date.now() };
+  const status = store[KEY] ??= { game: '', loaded: 'LOCAL', error: null, disabled: {}, startedAt: Date.now() };
+  status.disabled ??= {};
+  return status;
 }
 
 /** `GAIME_VERSION_FILE` (written by the live supervisor) wins over `GAIME_VERSION`. */

@@ -1,37 +1,40 @@
 import { Room, ServerError, Protocol, getMessageBytes, type Client } from 'colyseus';
 import { randomUUID } from 'node:crypto';
-import type { BasePlayer, BaseWorld, PlayerOf, Welcome } from '../shared/types';
+import type { BaseWorld, Welcome } from '../shared/types';
 import { CLOSE_REMOVED, CLOSE_REPLACED } from '../shared/types';
-import { PROTOCOL_VERSION, type RequestMessage, type ResponseMessage } from '../shared/protocol';
+import { JOIN_PROTOCOL, PROTOCOL_VERSION, type RequestMessage, type ResponseMessage } from '../shared/protocol';
 import { diffWorld, projectWorld, resolveNetwork, type WorldSnapshot } from '../shared/net';
-import { findPlayer, hydrate, nextId, pushFeed } from '../shared/world';
-import type { GameContext, GameDefinition } from './game';
-import { createChat } from './chat';
+import { findPlayer, pushFeed } from '../shared/world';
+import type { GameDefinition } from './game';
+import { cleanName, Engine } from './engine';
 import { readCheckpoint, saveCheckpoint } from './persistence';
 import { clearError, markError, runtime, setRoom } from './runtime';
-import { recordClients, recordPublish, recordTick, recordTickRate } from './metrics';
+import { recordClients, recordDropped, recordEngine, recordPart, recordPublish, recordTick, recordTickRate } from './metrics';
 
-type Cache<W> = { world: W; identities: Record<string, string>; sessions: Record<string, string> };
+type Cache<W> = { world: W; identities: Record<string, string>; sessions: Record<string, string>; batched?: string[] };
 type Command = { type: string; [key: string]: unknown };
-type Job<W extends BaseWorld> = { apply: (world: W, result: unknown, ctx: GameContext<W>) => void; fail?: (world: W, error: Error, ctx: GameContext<W>) => void; result?: unknown; error?: Error };
 
 const TICKET = /^[A-Za-z0-9_-]{16,64}$/;
 const SAVE_EVERY_MS = 2000;
 const EPHEMERAL = 'gaime-ephemeral';
 const BOT = 'gaime-bot';
 const BACKPRESSURE_BYTES = 64 * 1024;
+/** Ticks the clock may catch up at once after a slow tick; beyond that simulated time is dropped. */
+const MAX_CATCH_UP = 3;
+/** Client events per player per tick; the rest are dropped (a flood of sounds helps nobody). */
+const MAX_EVENTS_PER_CLIENT = 256;
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
-const cleanName = (raw: string) => raw.replace(/\s+/g, ' ').trim().slice(0, 24);
 
 /**
- * Builds the single shared room of a game. Everything that is not game rules lives here:
- * identities, reconnection, host role, input leases, delta publishing, checkpoints,
- * hot-reload cache/restore and error isolation.
+ * Builds the single shared room of a game: the network side of the `Engine` — identities,
+ * sessions, reconnection, input leases, the fixed-step clock, delta publishing, batched
+ * client events, checkpoints and hot-reload cache/restore.
  */
 export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, I>) {
   const net = resolveNetwork(game.network);
   const tickRate = game.tickRate ?? 30;
+  const stepMs = 1000 / tickRate;
   const publishEvery = Math.max(1, game.publishEvery ?? 2);
   const reconnectSeconds = game.reconnectSeconds ?? 30;
   const inputLeaseMs = game.inputLeaseMs ?? 400;
@@ -41,32 +44,52 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
   const omit = [...net.shared];
 
   return class GameRoom extends Room {
-    world: W = game.createWorld();
+    engine: Engine<W, I> = this.createEngine();
     identities: Record<string, string> = {};
     /** sessionId → playerId. */
     sessions: Record<string, string> = {};
+    /** Sessions of clients that receive batched `events` (protocol 3+). */
+    batched = new Set<string>();
     playerInputs: Record<string, I> = {};
     inputAt: Record<string, number> = {};
     snapshots = new Map<string, WorldSnapshot<W>>();
+    /** Client events of the current tick: to everyone, and per player. */
+    outbox = { all: [] as Array<[string, unknown]>, to: new Map<string, Array<[string, unknown]>>() };
+    droppedEvents = 0;
     revision = 0;
     ticks = 0;
+    lag = 0;
     lastSave = 0;
     savedTime = NaN;
     dirty = true;
     publishSoon = false;
     shuttingDown = false;
-    /** Set when a save could not be loaded: never overwrite the good checkpoint on disk. */
-    frozen: string | null = null;
-    ctx: GameContext<W> = this.context();
-    /** Finished async jobs waiting to be applied on the next tick. */
-    jobs: Job<W>[] = [];
     game = game;
-    chat = createChat(game as GameDefinition<W, unknown>, {
-      ctx: this.ctx,
-      bots: !!game.bot,
-      rename: (id, name) => this.rename(id, name),
-      pause: (id, paused) => this.engineCommand(id, { type: paused ? '$pause' : '$resume' }),
-    });
+
+    get world(): W { return this.engine.world; }
+    set world(world: W) { this.engine.world = world; }
+    get ctx() { return this.engine.ctx; }
+    get frozen() { return this.engine.frozen; }
+
+    createEngine(): Engine<W, I> {
+      const room = this;
+      runtime().disabled = {};
+      return new Engine<W, I>(game, {
+        notify: (playerId, text) => { for (const client of room.clients) if (room.sessions[client.sessionId] === playerId) client.send('notice', text); },
+        send: (name, data, playerId) => {
+          if (!playerId) { room.outbox.all.push([name, data]); return; }
+          const list = room.outbox.to.get(playerId) ?? [];
+          list.push([name, data]);
+          room.outbox.to.set(playerId, list);
+        },
+        disconnect: playerId => room.closePlayer(playerId),
+        failed: error => { markError(error); room.publishSoon = true; },
+        resumed: () => clearError(),
+        disabled: (owner, error) => { runtime().disabled[owner] = message(error); room.publishSoon = true; },
+        changed: () => { room.dirty = true; room.publishSoon = true; },
+        profile: recordPart,
+      });
+    }
 
     onCreate() {
       this.autoDispose = false;
@@ -75,19 +98,19 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       recordTickRate(tickRate);
       try {
         const saved = readCheckpoint<W>(game.name);
-        if (saved) { this.world = this.load(saved.world); this.identities = saved.identities; }
+        if (saved) { this.world = this.engine.load(saved.world); this.identities = saved.identities; }
       } catch (error) {
         this.freeze(error);
       }
       for (const player of Object.values(this.world.players)) player.online = false;
       // Test bots (join option `ephemeral`) never outlive their connection.
       for (const player of Object.values(this.world.players)) if (player.data[EPHEMERAL]) this.release(player.id);
-      this.prepare();
+      this.engine.prepare(runtime().loaded);
       if (!keepPlayers) {
         // After a process restart seats wait a minute for their players to come back.
         this.clock.setTimeout(() => {
           const connected = new Set(Object.values(this.sessions));
-          for (const player of Object.values(this.world.players)) if (!player.online && !connected.has(player.id)) this.release(player.id);
+          for (const player of Object.values(this.world.players)) if (!player.online && !player.data[BOT] && !connected.has(player.id)) this.release(player.id);
           this.persist();
         }, 60_000);
       }
@@ -105,15 +128,12 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       this.onMessage('command', (client, payload) => {
         const id = this.sessions[client.sessionId];
         if (!id || !payload || typeof payload !== 'object' || typeof (payload as Command).type !== 'string') return;
-        const command = payload as Command;
-        this.dirty = true; this.publishSoon = true;
-        const reply = this.runCommand(id, command, command.type.startsWith('$'));
+        const reply = this.engine.command(id, payload as Command);
         if (typeof reply === 'string' && reply) client.send('notice', reply);
       });
-
       this.onMessage('request', (client, message: RequestMessage) => void this.request(client, message));
 
-      this.setSimulationInterval(ms => this.tick(ms), 1000 / tickRate);
+      this.setSimulationInterval(ms => this.tick(ms), stepMs);
     }
 
     async request(client: Client, message: RequestMessage) {
@@ -122,149 +142,56 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       const reply = (response: Omit<ResponseMessage, 'id'>) => client.send('response', { id: message.id, ...response } satisfies ResponseMessage);
       const handler = game.requests?.[message.name];
       if (!handler) { reply({ ok: false, error: `Unknown request "${message.name}".` }); return; }
-      try { reply({ ok: true, result: await handler(this.world, id, message.payload, this.ctx) }); }
+      try { reply({ ok: true, result: await this.engine.outside(() => handler(this.world, id, message.payload, this.ctx)) }); }
       catch (error) { console.error(`[gaime] request ${message.name}`, error); reply({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     }
 
     // ── simulation ────────────────────────────────────────────────────
 
+    /** Fixed-step clock: every tick advances exactly 1 / tickRate s; a slow server catches up a little, then slows the game down instead of spiralling. */
     tick(ms: number) {
       const started = performance.now();
       const now = Date.now();
       for (const id of Object.keys(this.playerInputs)) if (now - (this.inputAt[id] ?? 0) > inputLeaseMs) { delete this.playerInputs[id]; delete this.inputAt[id]; }
-      if (this.jobs.length) {
-        for (const job of this.jobs.splice(0)) {
-          try {
-            if (job.error) job.fail?.(this.world, job.error, this.ctx);
-            else job.apply(this.world, job.result, this.ctx);
-          } catch (error) { this.fail(error); }
-        }
-        this.dirty = true;
-      }
-      if (game.bot && !this.world.pause) {
-        for (const player of Object.values(this.world.players)) {
-          if (!player.data[BOT]) continue;
-          try {
-            const input = game.bot(this.world, player.id, this.ctx);
-            if (input !== undefined) { this.playerInputs[player.id] = input; this.inputAt[player.id] = now; }
-          } catch (error) { this.fail(error); break; }
-        }
-      }
-      if (!this.world.pause) {
-        const dt = Math.min(ms / 1000, 0.1);
-        this.world.time += dt;
-        try { game.step(this.world, this.playerInputs, dt, this.ctx); }
-        catch (error) { this.fail(error); }
-      }
+      this.lag += ms;
+      let steps = Math.floor(this.lag / stepMs);
+      if (steps > MAX_CATCH_UP) { recordDropped((steps - MAX_CATCH_UP) * stepMs); steps = MAX_CATCH_UP; this.lag = 0; }
+      else this.lag -= steps * stepMs;
+      // Paused worlds still apply finished jobs.
+      if (steps === 0 && this.world.pause) this.engine.applyJobs();
+      for (let i = 0; i < steps; i++) this.engine.step(this.playerInputs);
+      this.flushEvents();
       recordTick(performance.now() - started);
       recordClients(this.clients.length);
+      const counters = this.engine.counters;
+      recordEngine({ ...counters, timersPending: this.world.schedule?.size ?? 0, droppedEvents: this.droppedEvents });
       if (++this.ticks % publishEvery === 0 || this.publishSoon) this.publish();
       if (now - this.lastSave > SAVE_EVERY_MS && (this.dirty || this.world.time !== this.savedTime)) this.persist();
     }
 
-    /** A thrown error pauses the game instead of crashing the process; the next hot reload resumes it. */
-    fail(error: unknown) {
-      console.error('[gaime] simulation', error);
-      this.world.pause = { reason: 'error', message: message(error) };
-      pushFeed(this.world, `⚠ Game code error: ${message(error)}. The game is paused — push a fix, new code resumes it.`);
-      markError(error);
-      this.publishSoon = true;
+    /** One message per client per tick with every event of the tick (older clients: one message per event). */
+    flushEvents() {
+      const { all, to } = this.outbox;
+      if (!all.length && !to.size) return;
+      for (const client of this.clients) {
+        const id = this.sessions[client.sessionId];
+        if (!id) continue;
+        let list = to.size && to.has(id) ? [...all, ...to.get(id)!] : all;
+        if (!list.length) continue;
+        if (list.length > MAX_EVENTS_PER_CLIENT) { this.droppedEvents += list.length - MAX_EVENTS_PER_CLIENT; list = list.slice(0, MAX_EVENTS_PER_CLIENT); }
+        if (this.batched.has(client.sessionId)) client.send('events', list);
+        else for (const [name, data] of list) client.send('event', { name, data });
+      }
+      this.outbox.all = [];
+      to.clear();
     }
 
     freeze(error: unknown) {
       console.error('[gaime] load', error);
-      this.frozen = message(error);
-      this.world.pause = { reason: 'error', message: this.frozen };
-      pushFeed(this.world, `⚠ The save could not be loaded: ${this.frozen}. The file on disk is left untouched.`);
+      this.engine.frozen = message(error);
+      this.world.pause = { reason: 'error', message: this.engine.frozen };
+      pushFeed(this.world, `⚠ The save could not be loaded: ${this.engine.frozen}. The file on disk is left untouched.`);
       markError(error);
-    }
-
-    /** Client and `ctx.command` commands: an error in game code becomes the reply, never an exception. */
-    runCommand(id: string, command: Command, engine = false): string | void {
-      try { return engine ? this.engineCommand(id, command) : game.command?.(this.world, id, command, this.ctx); }
-      catch (error) {
-        console.error(`[gaime] command ${command.type}`, error);
-        return `Error in the code of command "${command.type}": ${message(error)}`;
-      }
-    }
-
-    engineCommand(id: string, command: Command): string | void {
-      const player = this.world.players[id];
-      if (command.type === '$chat') return this.chat(this.world, id, command.text);
-      if (command.type === '$pause' || command.type === '$resume') {
-        if (this.world.hostId !== id) return 'Only the host can pause or resume the game.';
-        if (this.frozen) return 'The save did not load — fix the code first.';
-        this.world.pause = command.type === '$pause' ? { reason: 'host' } : null;
-        if (command.type === '$resume') clearError();
-        pushFeed(this.world, `${player.name} ${command.type === '$pause' ? 'paused' : 'resumed'} the game.`);
-        return;
-      }
-      return `Unknown command ${command.type}.`;
-    }
-
-    // ── engine context ────────────────────────────────────────────────
-
-    context(): GameContext<W> {
-      const room = this;
-      return {
-        get world() { return room.world; },
-        log: text => { pushFeed(room.world, text); },
-        notify: (playerId, text) => {
-          for (const client of room.clients) if (room.sessions[client.sessionId] === playerId) client.send('notice', text);
-        },
-        nextId: () => nextId(room.world),
-        random: Math.random,
-        isHost: playerId => room.world.hostId === playerId,
-        removePlayer: playerId => room.removePlayer(playerId),
-        save: () => { room.dirty = true; room.lastSave = 0; },
-        emit: (name, data, playerId) => {
-          if (!playerId) { room.broadcast('event', { name, data }); return; }
-          for (const client of room.clients) if (room.sessions[client.sessionId] === playerId) client.send('event', { name, data });
-        },
-        job: (work, apply, fail) => {
-          const job: Job<W> = { apply: apply as Job<W>['apply'], fail };
-          work.then(result => { job.result = result; room.jobs.push(job); }, error => { job.error = error instanceof Error ? error : new Error(String(error)); room.jobs.push(job); });
-        },
-        findPlayer: query => findPlayer(room.world.players, query) as PlayerOf<W> | undefined,
-        addBot: name => room.addBot(name),
-        isBot: playerId => !!room.world.players[playerId]?.data[BOT],
-        command: (playerId, command) => room.runCommand(playerId, command),
-      };
-    }
-
-    addBot(name?: string): string {
-      if (!game.bot) throw new Error('This game has no bot() brain (GameDefinition.bot).');
-      const id = `bot-${randomUUID().slice(0, 8)}`;
-      const count = Object.values(this.world.players).filter(p => p.data[BOT]).length;
-      const player = game.createPlayer(this.world, id, this.freeName(id, cleanName(name ?? '') || `Bot ${count + 1}`), this.ctx);
-      player.data[BOT] = true;
-      player.online = true;
-      this.world.players[id] = player;
-      pushFeed(this.world, `🤖 ${player.name} joined the game.`);
-      try { game.onPlayerOnline?.(this.world, player, true, this.ctx); } catch (error) { this.fail(error); }
-      this.dirty = true; this.publishSoon = true;
-      return id;
-    }
-
-    nameTaken(id: string, name: string) {
-      return Object.values(this.world.players).some(other => other.id !== id && other.name.toLowerCase() === name.toLowerCase());
-    }
-
-    /** `name`, or `name 2`, `name 3`… when another player already uses it. */
-    freeName(id: string, name: string) {
-      let candidate = name;
-      for (let n = 2; this.nameTaken(id, candidate); n++) candidate = `${name.slice(0, 20)} ${n}`;
-      return candidate;
-    }
-
-    rename(id: string, raw: string): string | void {
-      const name = cleanName(raw);
-      const player = this.world.players[id];
-      if (!player || !name) return 'Usage: /nick <new nick>';
-      if (this.nameTaken(id, name)) return `The nickname "${name}" is taken.`;
-      pushFeed(this.world, `${player.name} is now known as ${name}.`);
-      player.name = name;
-      this.dirty = true;
     }
 
     // ── admin (gaime CLI) ─────────────────────────────────────────────
@@ -273,12 +200,17 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       const players = () => Object.values(this.world.players).map(p => ({ id: p.id, name: p.name, online: p.online, host: this.world.hostId === p.id }));
       switch (action) {
         case 'players': return players();
-        case 'world': return projectWorld(this.world, resolveNetwork({ ...game.network, hidden: [] }));
+        case 'world': {
+          // Operators see everything, the timer queue included.
+          const everything = resolveNetwork(game.network);
+          everything.hidden.clear();
+          return projectWorld(this.world, everything);
+        }
         case 'say': pushFeed(this.world, `📣 ${String(args.text ?? '').slice(0, 280)}`); this.publishSoon = true; return { ok: true };
         case 'kick': {
           const target = findPlayer(this.world.players, String(args.player ?? ''));
           if (!target) throw new Error(`No player named "${args.player}".`);
-          this.removePlayer(target.id); return { removed: target.name };
+          this.ctx.removePlayer(target.id); this.persist(); return { removed: target.name };
         }
         case 'pause': this.world.pause = { reason: 'host' }; return { paused: true };
         case 'resume': if (this.frozen) throw new Error('The save did not load — fix the code first.'); this.world.pause = null; clearError(); return { paused: false };
@@ -287,47 +219,12 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
           const name = String(args.name ?? '');
           const command = game.admin?.[name];
           if (!command) throw new Error(`Unknown admin command "${name}". Available: ${Object.keys(game.admin ?? {}).join(', ') || 'none'}`);
-          const result = command.run(this.world, Array.isArray(args.args) ? args.args.map(String) : [], this.ctx);
-          this.dirty = true; this.publishSoon = true;
+          const result = this.engine.outside(() => command.run(this.world, Array.isArray(args.args) ? args.args.map(String) : [], this.ctx));
           return result ?? { ok: true };
         }
         case 'commands': return Object.fromEntries(Object.entries(game.admin ?? {}).map(([name, command]) => [name, command.description]));
         default: throw new Error(`Unknown action ${action}.`);
       }
-    }
-
-    /** Fill new fields from defaults, then the game's explicit migration. */
-    load(raw: unknown): W {
-      // A throwaway world and context: the template must not touch the real world (seq, feed, events).
-      const scratch = game.createWorld();
-      const quiet: GameContext<W> = {
-        ...this.ctx, world: scratch, log() {}, notify() {}, emit() {}, save() {}, removePlayer() {}, job() {},
-        nextId: () => nextId(scratch),
-        isHost: () => false,
-        findPlayer: () => undefined,
-        isBot: () => false,
-        addBot: () => { throw new Error('addBot is not available while building the player template.'); },
-        command: () => undefined,
-      };
-      const template = game.createPlayer(scratch, 'template', 'template', quiet) as BasePlayer;
-      const world = hydrate(structuredClone(raw), game.createWorld(), template);
-      return game.migrate ? game.migrate(world) : world;
-    }
-
-    prepare() {
-      this.world.version = runtime().loaded;
-      if (!this.frozen && this.world.pause?.reason === 'error') this.world.pause = null;
-      // Bots have no connection to come back with: they are online whenever the room runs.
-      for (const player of Object.values(this.world.players)) if (player.data[BOT]) player.online = true;
-      try { game.prepare?.(this.world, this.ctx); } catch (error) { this.fail(error); }
-      this.ensureHost();
-    }
-
-    ensureHost() {
-      const current = this.world.hostId ? this.world.players[this.world.hostId] : undefined;
-      if (current?.online && !current.data[BOT]) return;
-      const next = Object.values(this.world.players).find(player => player.online && !player.data[BOT]);
-      this.world.hostId = next?.id ?? null;
     }
 
     // ── network ───────────────────────────────────────────────────────
@@ -349,7 +246,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
 
     publish() {
       this.publishSoon = false;
-      this.ensureHost();
+      this.engine.ensureHost();
       const started = performance.now();
       let largest = 0;
       let snapshot: WorldSnapshot<W> | undefined;
@@ -403,20 +300,21 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       return { ticket };
     }
 
-    onJoin(client: Client, options: { name?: unknown; ephemeral?: unknown }, auth: { ticket: string }) {
+    onJoin(client: Client, options: { name?: unknown; ephemeral?: unknown; [JOIN_PROTOCOL]?: unknown }, auth: { ticket: string }) {
       const name = typeof options?.name === 'string' ? cleanName(options.name) : '';
       let id = this.identities[auth.ticket];
       if (!id || !this.world.players[id]) {
         id = randomUUID();
-        this.world.players[id] = game.createPlayer(this.world, id, this.freeName(id, name || `Player ${Object.keys(this.world.players).length + 1}`), this.ctx);
+        const player = this.engine.addPlayer(id, name);
         this.identities[auth.ticket] = id;
-        if (options?.ephemeral === true) this.world.players[id].data[EPHEMERAL] = true;
-        else pushFeed(this.world, `${this.world.players[id].name} joined the game.`);
+        if (options?.ephemeral === true) player.data[EPHEMERAL] = true;
+        else pushFeed(this.world, `${player.name} joined the game.`);
       } else if (name && name !== this.world.players[id].name) {
         // Same rule as /nick; a taken name keeps the current one.
-        if (this.nameTaken(id, name)) client.send('notice', `The nickname "${name}" is taken — you keep "${this.world.players[id].name}".`);
+        if (this.engine.nameTaken(id, name)) client.send('notice', `The nickname "${name}" is taken — you keep "${this.world.players[id].name}".`);
         else this.world.players[id].name = name;
       }
+      if (Number(options?.[JOIN_PROTOCOL]) >= 3) this.batched.add(client.sessionId);
       // The same browser identity opened in another tab takes over the character.
       for (const other of this.clients) {
         if (other.sessionId === client.sessionId || this.sessions[other.sessionId] !== id) continue;
@@ -447,6 +345,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
 
     onLeave(client: Client) {
       this.snapshots.delete(client.sessionId);
+      this.batched.delete(client.sessionId);
       if (this.shuttingDown) return;
       const id = this.sessions[client.sessionId];
       this.goOffline(client);
@@ -464,29 +363,18 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
     }
 
     setOnline(id: string, online: boolean) {
-      const player = this.world.players[id] as PlayerOf<W> | undefined;
-      if (!player) return;
-      player.online = online;
       if (!online) { delete this.playerInputs[id]; delete this.inputAt[id]; }
-      try { game.onPlayerOnline?.(this.world, player, online, this.ctx); } catch (error) { this.fail(error); }
-      this.ensureHost();
-      this.dirty = true; this.publishSoon = true;
+      this.engine.setOnline(id, online);
     }
 
     release(id: string) {
-      const player = this.world.players[id] as PlayerOf<W> | undefined;
-      if (!player) return;
-      try { game.onPlayerRemoved?.(this.world, player, this.ctx); } catch (error) { this.fail(error); }
-      delete this.world.players[id];
       delete this.playerInputs[id]; delete this.inputAt[id];
       for (const [ticket, playerId] of Object.entries(this.identities)) if (playerId === id) delete this.identities[ticket];
-      this.ensureHost();
-      this.dirty = true; this.publishSoon = true;
+      this.engine.release(id);
     }
 
-    removePlayer(id: string) {
-      const player = this.world.players[id];
-      if (!player) return;
+    /** Close every connection of a player the game removed (`ctx.removePlayer`, `/kick`). */
+    closePlayer(id: string) {
       for (const client of [...this.clients]) {
         if (this.sessions[client.sessionId] !== id) continue;
         delete this.sessions[client.sessionId];
@@ -494,9 +382,8 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
         client.send('removed');
         client.leave(CLOSE_REMOVED);
       }
-      pushFeed(this.world, `${player.name} left the game.`);
-      this.release(id);
-      this.persist();
+      delete this.playerInputs[id]; delete this.inputAt[id];
+      for (const [ticket, playerId] of Object.entries(this.identities)) if (playerId === id) delete this.identities[ticket];
     }
 
     // ── persistence & hot reload ──────────────────────────────────────
@@ -512,17 +399,18 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
     onCacheRoom(): Cache<W> {
       this.shuttingDown = true;
       this.persist();
-      return { world: this.world, identities: this.identities, sessions: this.sessions };
+      return { world: this.world, identities: this.identities, sessions: this.sessions, batched: [...this.batched] };
     }
 
     onRestoreRoom(cache?: Cache<W>) {
       if (!cache) return;
       this.identities = cache.identities ?? {};
       this.sessions = cache.sessions ?? {};
+      this.batched = new Set(cache.batched ?? []);
       this.playerInputs = {}; this.inputAt = {}; this.snapshots.clear();
       try {
-        this.world = this.load(cache.world);
-        this.frozen = null;
+        this.world = this.engine.load(cache.world);
+        this.engine.frozen = null;
         clearError();
         pushFeed(this.world, `♻ New game code loaded (${runtime().loaded.slice(0, 8)}).`);
       } catch (error) {
@@ -531,7 +419,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
         this.freeze(error);
       }
       for (const player of Object.values(this.world.players)) player.online = false;
-      this.prepare();
+      this.engine.prepare(runtime().loaded);
     }
 
     onBeforeShutdown() {

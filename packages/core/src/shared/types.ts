@@ -1,3 +1,5 @@
+import type { Schedule } from './schedule';
+
 /** Values allowed in free-form `data` bags. Keep them flat so checkpoints and patches stay trivial. */
 export type Scalar = number | string | boolean;
 export type Data = Record<string, Scalar>;
@@ -27,18 +29,24 @@ export interface Pause {
 
 /**
  * Every game world extends this. The engine owns these fields:
- * `version`, `time` (seconds, advances only when not paused), `pause`, `hostId`, `feed`, `seq`.
+ * `version`, `time` (seconds, advances only when not paused), `tick`, `pause`, `hostId`,
+ * `feed`, `seq` and `schedule`.
  */
 export interface BaseWorld<P extends BasePlayer = BasePlayer> {
   schema: number;
   version: string;
+  /** Simulation time in seconds: the one clock for every rule, timer and cooldown. */
   time: number;
+  /** Simulation steps since the world was created (each is exactly 1 / tickRate seconds). */
+  tick: number;
   pause: Pause | null;
   hostId: string | null;
   players: Record<string, P>;
   feed: FeedItem[];
   /** Monotonic id source for entities and effects: use `ctx.nextId()`. */
   seq: number;
+  /** Engine timers (`ctx.after`, `ctx.every`). Server-only: never sent to clients. */
+  schedule: Schedule;
 }
 
 export type PlayerOf<W extends BaseWorld> = W['players'][string];
@@ -58,6 +66,8 @@ export interface Health {
   /** Version of the server code that is actually loaded (changes after HMR). */
   version: string;
   error: string | null;
+  /** Modules switched off after an error (module id → message), until the next code load. */
+  disabled?: Record<string, string>;
   uptime: number;
 }
 

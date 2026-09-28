@@ -11,12 +11,16 @@
  * server → client
  *   welcome  { id, game, version, protocol, revision, host, world }   full snapshot
  *   patch    { base, revision, values?, removed?, entities?, streams? } delta against `base`
- *   event    { name, data }                       one-off, not stored in the world (sounds, shakes, toasts)
+ *   events   [[name, data], …]                    one-off events of one tick, batched (protocol 3+ clients)
+ *   event    { name, data }                       the same, one message per event (older clients)
  *   response { id, ok, result? , error? }
  *   notice   string                               private toast
  *   removed                                       you were removed from the game (close 4102 follows)
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
+
+/** Join option telling the room this client understands batched `events` (protocol 3+). */
+export const JOIN_PROTOCOL = 'protocol';
 
 export interface RequestMessage {
   id: number;

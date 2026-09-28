@@ -21,6 +21,11 @@ export interface NetworkConfig {
   hidden?: string[];
   /** Top-level keys that are replaced wholesale, never mutated: shared by reference. */
   shared?: string[];
+  /**
+   * Bus events (`ctx.trigger`) that are also delivered to clients as `event` messages,
+   * e.g. `['enemy.died']` for sounds and effects. Default: none.
+   */
+  events?: string[];
 }
 
 export const DEFAULT_PRECISION: Record<string, number> = {
@@ -51,6 +56,7 @@ export interface ResolvedNetwork {
   precision: Record<string, number>;
   hidden: Set<string>;
   shared: Set<string>;
+  events: Set<string>;
 }
 
 export function resolveNetwork(config: NetworkConfig = {}): ResolvedNetwork {
@@ -58,8 +64,10 @@ export function resolveNetwork(config: NetworkConfig = {}): ResolvedNetwork {
     entities: new Set(config.entities ?? ['players']),
     streams: new Set(config.streams ?? ['feed']),
     precision: { ...DEFAULT_PRECISION, ...config.precision },
-    hidden: new Set(config.hidden ?? []),
+    // The timer queue is engine state: it never leaves the server.
+    hidden: new Set(['schedule', ...(config.hidden ?? [])]),
     shared: new Set(config.shared ?? []),
+    events: new Set(config.events ?? []),
   };
 }
 

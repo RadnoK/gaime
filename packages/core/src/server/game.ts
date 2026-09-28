@@ -1,10 +1,38 @@
 import type { Application } from 'express';
 import type { BaseWorld, PlayerOf } from '../shared/types';
 import type { NetworkConfig } from '../shared/net';
+import type { Behaviour, EventMap, Registry } from '../shared/registry';
+import type { TimerOptions } from '../shared/schedule';
 
 /** Engine services available to game code during `step`, `command` and hooks. */
-export interface GameContext<W extends BaseWorld> {
+export interface GameContext<W extends BaseWorld, E extends EventMap = EventMap> {
   readonly world: W;
+  /**
+   * Put an event on the bus. Handlers (`on` of the game and of every module) run after the
+   * current piece of work finishes, in the same tick, in a deterministic order. Payloads
+   * must be plain JSON when the event is scheduled or forwarded to clients.
+   */
+  trigger<Name extends keyof E & string>(event: Name, data: E[Name]): void;
+  /** Pass `value` through every `modify[name]` of the game and the modules, in order. */
+  modify<T>(name: string, value: T, data?: unknown): T;
+  /** Fire `event` after `seconds` of world time (pauses stop it). Returns the timer key. */
+  after<Name extends keyof E & string>(seconds: number, event: Name, data?: E[Name], options?: { key?: string }): string;
+  /** Fire `event` every `seconds` (first after `seconds`). Same key + event + interval → the running timer is kept. */
+  every<Name extends keyof E & string>(seconds: number, event: Name, data?: E[Name], options?: Omit<TimerOptions, 'every'>): string;
+  /** Cancel a timer by key; with `prefix: true` every timer whose key starts with it. Returns how many. */
+  cancel(key: string, options?: { prefix?: boolean }): number;
+  /** Seconds until the timer with this key fires, or undefined. */
+  timeLeft(key: string): number | undefined;
+  /** Live timers whose key starts with `prefix` (all when empty). */
+  timers(prefix?: string): number;
+  /**
+   * Run code owned by a module: an exception disables that module (reported in the feed and
+   * `/health`) instead of pausing the game; returns undefined when it failed or is disabled.
+   * Owner `game` pauses the game as usual. Use it when calling definition hooks.
+   */
+  isolate<T>(owner: string, run: () => T): T | undefined;
+  /** Whether a module is currently disabled after an error (until the next code load). */
+  disabled(owner: string): boolean;
   /** Message visible to everyone in the world feed. */
   log(text: string): void;
   /** Private toast for one player. */
@@ -18,8 +46,9 @@ export interface GameContext<W extends BaseWorld> {
   /** Ask for a checkpoint soon (the engine also saves every ~2 s while time moves). */
   save(): void;
   /**
-   * One-off message to everyone, or to one player: sounds, screen shake, toasts.
-   * Not stored in the world — clients that join later never see it.
+   * One-off message to clients — everyone, or one player: sounds, screen shake, toasts.
+   * Not stored in the world — clients that join later never see it. Batched per tick.
+   * (Game logic that should react to something uses `trigger` instead.)
    */
   emit(name: string, data?: unknown, playerId?: string): void;
   /**
@@ -27,7 +56,7 @@ export interface GameContext<W extends BaseWorld> {
    * inside the simulation. Pending jobs are dropped by a hot reload, so keep the
    * request itself in the world if it must survive (e.g. `enemy.data.pathRequested`).
    */
-  job<T>(work: Promise<T>, apply: (world: W, result: T, ctx: GameContext<W>) => void, fail?: (world: W, error: Error, ctx: GameContext<W>) => void): void;
+  job<T>(work: Promise<T>, apply: (world: W, result: T, ctx: GameContext<W, E>) => void, fail?: (world: W, error: Error, ctx: GameContext<W, E>) => void): void;
   /** Case-insensitive name lookup (exact, then unique prefix). */
   findPlayer(nameOrId: string): PlayerOf<W> | undefined;
   /**
@@ -58,7 +87,7 @@ export interface AdminCommand<W extends BaseWorld> {
 
 export type RequestHandler<W extends BaseWorld> = (world: W, playerId: string, payload: unknown, ctx: GameContext<W>) => unknown | Promise<unknown>;
 
-export interface GameDefinition<W extends BaseWorld, I = unknown> {
+export interface GameDefinition<W extends BaseWorld, I = unknown, S = any, E extends EventMap = EventMap> extends Behaviour<S, E> {
   /** Room name, checkpoint name and browser storage prefix. Lowercase, stable. */
   name: string;
   /** Maximum players online at once. Default: unlimited. */
@@ -88,12 +117,12 @@ export interface GameDefinition<W extends BaseWorld, I = unknown> {
    */
   migrate?(world: W): W;
   /** Called after load, after every hot reload and on first start (e.g. refresh the catalog). */
-  prepare?(world: W, ctx: GameContext<W>): void;
+  prepare?(world: W, ctx: GameContext<W, E>): void;
 
-  createPlayer(world: W, id: string, name: string, ctx: GameContext<W>): PlayerOf<W>;
-  onPlayerOnline?(world: W, player: PlayerOf<W>, online: boolean, ctx: GameContext<W>): void;
+  createPlayer(world: W, id: string, name: string, ctx: GameContext<W, E>): PlayerOf<W>;
+  onPlayerOnline?(world: W, player: PlayerOf<W>, online: boolean, ctx: GameContext<W, E>): void;
   /** The player is about to be deleted from the world. */
-  onPlayerRemoved?(world: W, player: PlayerOf<W>, ctx: GameContext<W>): void;
+  onPlayerRemoved?(world: W, player: PlayerOf<W>, ctx: GameContext<W, E>): void;
 
   /**
    * What one player may see: return a copy of `world` without other players' secrets
@@ -104,16 +133,29 @@ export interface GameDefinition<W extends BaseWorld, I = unknown> {
   view?(world: W, playerId: string): W;
   /** Validate and normalise raw client input. Return undefined to ignore it. */
   parseInput(raw: unknown): I | undefined;
-  /** Advance the simulation. `dt` in seconds. Not called while paused. */
-  step(world: W, inputs: Readonly<Record<string, I>>, dt: number, ctx: GameContext<W>): void;
+  /**
+   * Advance the simulation by one tick (`dt` = 1 / tickRate seconds). Not called while paused.
+   * Runs after the `input` systems and before the `update` systems.
+   */
+  step?(world: W, inputs: Readonly<Record<string, I>>, dt: number, ctx: GameContext<W, E>): void;
+  /**
+   * The module registry: its modules' `on`, `modify`, `systems` and `commands` run in the engine
+   * (after the game's own), isolated per module.
+   */
+  features?: Pick<Registry<any>, 'handlers' | 'modifiers' | 'systems' | 'commands'>;
+  /**
+   * Builds what handlers, systems and module commands receive (the game's `Sim` facade).
+   * Called once per tick and per command. Default: the `GameContext` itself.
+   */
+  sim?(ctx: GameContext<W, E>, dt: number): S;
   /** Discrete player actions. Return a string to send it back to the player as a notice. */
-  command?(world: W, playerId: string, command: { type: string; [key: string]: unknown }, ctx: GameContext<W>): string | void;
+  command?(world: W, playerId: string, command: { type: string; [key: string]: unknown }, ctx: GameContext<W, E>): string | void;
 
   /**
    * Brain of bot players: called every tick for each bot, returns its input (like a client would send).
    * Discrete actions: `ctx.command(botId, {...})`. Enables `/bot` and `/bot remove` in chat (host only).
    */
-  bot?(world: W, botId: string, ctx: GameContext<W>): I | undefined;
+  bot?(world: W, botId: string, ctx: GameContext<W, E>): I | undefined;
   /** RPC: `client.request(name, payload)` resolves with the returned value (or rejects with a thrown error). */
   requests?: Record<string, RequestHandler<W>>;
   /** Chat: extra slash commands (`/name args`) and an optional filter (return null to drop a message). */
@@ -127,7 +169,7 @@ export interface GameDefinition<W extends BaseWorld, I = unknown> {
   routes?(app: Application): void;
 }
 
-export function defineGame<W extends BaseWorld, I>(game: GameDefinition<W, I>): GameDefinition<W, I> {
+export function defineGame<W extends BaseWorld, I, S = any, E extends EventMap = EventMap>(game: GameDefinition<W, I, S, E>): GameDefinition<W, I, S, E> {
   if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(game.name)) throw new Error(`Invalid game name "${game.name}" (lowercase letters, digits, dashes).`);
   return game;
 }

@@ -4,3 +4,4 @@ export * from './registry';
 export * from './world';
 export * from './math';
 export * from './protocol';
+export * from './schedule';
