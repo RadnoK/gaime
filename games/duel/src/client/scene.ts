@@ -101,7 +101,7 @@ export class Battlefield {
   private frame(dt: number) {
     const world = this.world;
     if (!world) return;
-    const time = this.clock.now(0.1);
+    const time = this.clock.now();
     const camera = this.stage.camera;
     const positions: THREE.Vector3[] = [];
     this.players.forEach((object, player) => {

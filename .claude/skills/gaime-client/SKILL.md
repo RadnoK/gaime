@@ -23,9 +23,9 @@ Files: `games/<game>/src/client/` — `main.ts` (wiring + HMR), `scene.ts` (Thre
 - `createStage({ container })` → renderer, scene, camera, `onFrame(dt)`, `dispose()`.
 - `CameraRig(camera, { offset: CAMERA.topDown | overhead | side | chase })`, `rig.update(target, dt)`, `rig.shake(0.5)`.
 - `EntityLayer<T>(scene, create, key)` per entity dictionary: `layer.sync(Object.values(world.enemies))` on each world, `layer.forEach((object, entity) => …)` each frame. The `key` rebuilds the object when it changes (e.g. visual).
-- Smooth remote entities: `ServerClock.sync(world.time)` + `Interpolator.push(id, world.time, {x, z, angle})`, render at `clock.now(0.1)`. Your own character: predict with the shared movement function from `src/shared/rules.ts`, reconcile softly (see `games/starter/src/client/scene.ts`).
+- Smooth remote entities: `ServerClock.sync(world.time)` + `Interpolator.push(id, world.time, {x, z, angle})`, render at `clock.now()` (automatic buffer: one patch interval + measured jitter). Your own character: predict with the shared movement function from `src/shared/rules.ts`, reconcile softly (see `games/starter/src/client/scene.ts`).
 - Models: `ModelLibrary.build(visual)` for descriptors from the catalog; custom shapes via `library.register(shape, visual => object)` (module `client.ts` → `models`), glTF via `await library.load('tree', '/models/tree.glb', { height: 2 })` (files in `games/<game>/public/`).
-- Effects: `new EffectsLayer(scene, { project?, renderers? })`, `effects.sync(world.effects)`, `effects.update(clock.now(0.1))`. Built-in: tracer, pulse, hit, spawn, text, explosion; add your own `EffectRenderer`.
+- Effects: `new EffectsLayer(scene, { project?, renderers? })`, `effects.sync(world.effects)`, `effects.update(clock.now())`. Built-in: tracer, pulse, hit, spawn, text, explosion; add your own `EffectRenderer`.
 - Bars and labels: `createBar`/`setBar`/`faceCamera`, `createLabel`/`setLabel`.
 - Dispose what you create (`layer.dispose()`, `stage.dispose()`); shared primitive geometries are marked and skipped automatically.
 

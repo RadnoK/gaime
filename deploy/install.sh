@@ -3,15 +3,17 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/deploy/install.sh -o install.sh
 #   sudo bash install.sh <game> <domain> <git-url> [--mode live|release] [--proxy traefik|caddy|none]
-#                        [--password] [--dir /srv/gaime] [--branch main]
+#                        [--password] [--dir /srv/gaime] [--branch main] [--print-deploy-key]
 #
+# --print-deploy-key: only create the read-only deploy key (SSH git URLs), print its public
+# half and exit — for scripted setups that add it with `gh repo deploy-key add` first.
 # Afterwards every push to the branch reaches the players automatically.
 set -euo pipefail
 
 usage() { sed -n '2,10p' "$0"; exit 1; }
 [[ $# -ge 3 ]] || usage
 GAME=$1; DOMAIN=$2; REPO_URL=$3; shift 3
-MODE=live; PROXY=traefik; PASSWORD=0; BASE_DIR=/srv/gaime; BRANCH=main
+MODE=live; PROXY=traefik; PASSWORD=0; BASE_DIR=/srv/gaime; BRANCH=main; PRINT_KEY=0
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mode) MODE=$2; shift 2 ;;
@@ -19,6 +21,7 @@ while [[ $# -gt 0 ]]; do
     --password) PASSWORD=1; shift ;;
     --dir) BASE_DIR=$2; shift 2 ;;
     --branch) BRANCH=$2; shift 2 ;;
+    --print-deploy-key) PRINT_KEY=1; shift ;;
     *) usage ;;
   esac
 done
@@ -28,6 +31,13 @@ for tool in docker git ssh-keygen ssh-keyscan; do command -v "$tool" >/dev/null 
 docker compose version >/dev/null || { echo "Missing docker compose v2"; exit 1; }
 
 BASE="$BASE_DIR/$GAME"
+if [[ $PRINT_KEY == 1 ]]; then
+  [[ $REPO_URL == git@* || $REPO_URL == ssh://* ]] || { echo "--print-deploy-key needs an SSH git URL (git@host:owner/repo.git)." >&2; exit 1; }
+  mkdir -p "$BASE/ssh"
+  [[ -f $BASE/ssh/deploy-key ]] || ssh-keygen -q -t ed25519 -N '' -C "gaime-$GAME@$(hostname)" -f "$BASE/ssh/deploy-key"
+  cat "$BASE/ssh/deploy-key.pub"
+  exit 0
+fi
 echo "▶ $GAME → https://$DOMAIN  (mode $MODE, proxy $PROXY, directory $BASE)"
 mkdir -p "$BASE"/{data,ssh,auth,backups}
 
@@ -50,7 +60,7 @@ chmod 700 "$BASE/ssh"; chmod 600 "$BASE"/ssh/* 2>/dev/null || true
 
 # ── repository clone (the supervisor only fetches; it never touches the working tree) ──
 if [[ ! -d $BASE/repo/.git ]]; then
-  git clone --branch "$BRANCH" "$REPO_URL" "$BASE/repo"
+  git clone --branch "$BRANCH" "$REPO_URL" "$BASE/repo" || { echo "Clone failed. For an SSH URL: add the deploy key above to the repository, then run this script again (it is idempotent)."; exit 1; }
 else
   git -C "$BASE/repo" fetch origin "$BRANCH" && git -C "$BASE/repo" merge --ff-only "origin/$BRANCH" || echo "(repo: working tree not updated)"
 fi

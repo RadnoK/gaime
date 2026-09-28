@@ -84,7 +84,7 @@ export function builtinEffects(project: (x: number, z: number, y: number) => THR
  *
  *   const effects = new EffectsLayer(stage.scene);
  *   net.on('world', world => effects.sync(world.effects));
- *   stage.onFrame(() => effects.update(clock.now(0.1)));
+ *   stage.onFrame(() => effects.update(clock.now()));
  */
 export class EffectsLayer {
   readonly group = new THREE.Group();

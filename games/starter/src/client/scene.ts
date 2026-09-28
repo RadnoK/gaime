@@ -132,7 +132,7 @@ export class Arena {
   private frame(dt: number) {
     const world = this.world;
     if (!world) return;
-    const renderTime = this.clock.now(0.1);
+    const renderTime = this.clock.now();
     const camera = this.stage.camera;
 
     if (this.local && this.input) movePlayer(this.local, this.input, world.pause ? 0 : dt);

@@ -58,6 +58,8 @@ export interface Welcome {
   protocol: number;
   revision: number;
   host: boolean;
+  /** Simulation ticks per second; the client paces its input to it (absent from older servers). */
+  tickRate?: number;
 }
 
 export interface Health {

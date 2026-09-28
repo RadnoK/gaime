@@ -38,17 +38,27 @@ Controls (inside the container: `docker compose exec game node /app/packages/hos
 
 ## Put a game online (first time)
 
-Needs: a VPS with Docker, a domain pointing to it, the repo reachable over SSH.
+From zero, entirely in the terminal: follow `docs/DEPLOYMENT.md` → "From zero, in the terminal (Vultr)". What you need from the user, and nothing else:
+
+1. A Vultr API key (`VULTR_API_KEY`; they create the account and the key once in the web UI — you cannot). Never write it to a file in the repo.
+2. The game directory, the fork's git URL (SSH for private repos), the region closest to their players (`waw` for Poland; ask if unclear).
+3. A domain, or agreement to use `<ip-with-dashes>.sslip.io` (fine for jams and tests; a public game should get its own domain).
+4. `gh` logged in (`gh auth status`) so you can add the read-only deploy key yourself.
+
+Then run steps 1–6 of that section: `vultr-cli` creates the SSH key, firewall (22/80/443) and a `vc2-2c-4gb` server with `--image docker`, and waits for its IP; then `scp deploy/install.sh`, `install.sh … --print-deploy-key` → `gh repo deploy-key add`, `install.sh … --mode live --proxy caddy`, and poll `https://<domain>/health`. Report the URL, the server id and IP, and how to tear it down. Creating a server costs money — confirm the plan and region with the user before step 4.
+
+On a VPS the user already has (Ubuntu/Debian, root SSH): skip to step 5. Manually on the server:
 
 ```sh
 sudo bash deploy/install.sh <game> <domain> git@github.com:org/repo.git --mode live --proxy traefik
 #   --proxy caddy  (own HTTPS on 80/443)   --proxy none  (your proxy → 127.0.0.1:<port>)
-#   --password     (shared password, login "player")
+#   --password     (shared password, login "player"; interactive)
+#   --print-deploy-key  (only create and print the deploy key, then exit)
 ```
 
-The script prints a deploy key — it must be added to the repository as a **read-only deploy key** before the clone works. Several games per server are fine (separate directories/ports/domains).
+Several games per server are fine (separate directories/ports/domains). Without Docker: `deploy/systemd/gaime@.service` (see docs/DEPLOYMENT.md). On a laptop / Tailscale: `cd games/<game> && npx gaime host` (deploys local commits when there is no origin).
 
-Without Docker: `deploy/systemd/gaime@.service` (see docs/DEPLOYMENT.md). On a laptop / Tailscale: `cd games/<game> && npx gaime host` (deploys local commits when there is no origin).
+Latency: the server region matters most — one game runs on one server, so host near most players; keep the domain unproxied (Cloudflare "DNS only"). Game-side tuning is in the `gaime-networking` skill.
 
 ## Modes
 

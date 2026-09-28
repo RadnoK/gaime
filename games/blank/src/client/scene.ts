@@ -69,7 +69,7 @@ export class Scene {
   private frame(dt: number) {
     if (!this.world) return;
     if (this.local && this.input) movePlayer(this.local, this.input, dt);
-    const renderTime = this.clock.now(0.1);
+    const renderTime = this.clock.now();
     this.players.forEach((object, player) => {
       const at = player.id === this.meId && this.local ? this.local : this.tracks.sample(player.id, renderTime) ?? player;
       object.position.set(at.x, 0, at.z);

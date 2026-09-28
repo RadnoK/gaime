@@ -9,7 +9,7 @@
  *   request  { id, name, payload }                RPC; answered with `response`
  *
  * server → client
- *   welcome  { id, game, version, protocol, revision, host, world }   full snapshot
+ *   welcome  { id, game, version, protocol, revision, host, tickRate, world }   full snapshot
  *   patch    { base, revision, values?, removed?, entities?, streams? } delta against `base`
  *   events   [[name, data], …]                    one-off events of one tick, batched (protocol 3+ clients)
  *   event    { name, data }                       the same, one message per event (older clients)

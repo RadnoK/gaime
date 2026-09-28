@@ -41,10 +41,24 @@ Checklist when bandwidth is high: big dictionaries listed in `entities`? Per-tic
 
 ## Make it feel good under latency
 
-- Interpolate remote entities 100 ms in the past (`ServerClock` + `Interpolator`).
+- Interpolate remote entities at `clock.now()` (`ServerClock` + `Interpolator`): the buffer adapts to the publish rate and the connection's jitter. Never a hard-coded 100 ms.
 - Predict your own movement with the shared movement function, reconcile softly (snap only when far off).
 - Local visual feedback immediately (muzzle flash, sound) — the authoritative result follows.
 - Aim/look direction can be local while the server uses the value from `input`.
+
+## Low latency (action games)
+
+Distance is only part of it. Per update of another player: round trip + waiting for the tick (~½ tick) + waiting for the publish (~½ publish interval) + interpolation buffer (~1 publish interval + jitter) + a render frame. Defaults (30 Hz, `publishEvery: 2`) ≈ RTT + 140 ms; the fast settings ≈ RTT + 60 ms:
+
+```ts
+tickRate: 60,
+publishEvery: 1,       // 60 patches/s: 2× simulation CPU, 4× patches — measure with npm run load
+```
+
+- The client paces `input` to the server tick by itself (`tickRate` in `welcome`).
+- Prediction for your own character is not optional in a fast game.
+- The server region matters most: host near the players (docs/DEPLOYMENT.md), domain not proxied (Cloudflare "DNS only").
+- Details and the full table: `docs/PROTOCOL.md#latency-budget`.
 
 ## Measure
 
@@ -59,7 +73,7 @@ npm run load -- <game> --bots 50 --seconds 30
 npx gaime load --input '{"mx":"$rand","mz":"$rand","fire":"$bool"}' --rate 30 --chat 0.3   # inside games/<game>
 ```
 
-Budgets: tick max < 33 ms (30 Hz), publish ms small, event loop p99 < 20 ms, patch bytes per client ideally < 2–4 KB.
+Budgets: tick max < 1000 / tickRate ms (33 ms at 30 Hz, 16.7 ms at 60 Hz), publish ms small, event loop p99 < 20 ms, patch bytes per client ideally < 2–4 KB.
 
 If the tick is the problem, find the culprit first:
 

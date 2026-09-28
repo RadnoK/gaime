@@ -236,6 +236,8 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
       this.snapshot = { world: data.world, revision: data.revision };
       this.resyncing = false;
       this.gate.reset();
+      // One input per server tick: faster is wasted, slower delays the next tick.
+      if (data.tickRate && data.tickRate > 0) this.gate.minMs = Math.min(33, 1000 / data.tickRate);
       for (const listener of this.listeners.welcome) listener(data);
       this.emitWorld(data.world);
     });

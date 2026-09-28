@@ -353,7 +353,7 @@ In `frame()`, predict with the real speed and update the ring. Replace the begin
     // Predict with the same speed the server uses (boosts, the "it" bonus): shared rules, world data.
     const me = world.players[this.meId];
     if (this.local && this.input && me) movePlayer(this.local, this.input, dt, speedOf(world, me));
-    const renderTime = this.clock.now(0.1);
+    const renderTime = this.clock.now();
     this.players.forEach((object, player) => {
       const at = player.id === this.meId && this.local ? this.local : this.tracks.sample(player.id, renderTime) ?? player;
       object.position.set(at.x, 0, at.z);

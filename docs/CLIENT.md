@@ -511,12 +511,13 @@ All three games put the view in a class. The class owns a stage, a `ServerClock`
 
 ### Interpolating remote entities
 
-Patches arrive at about 15 Hz with network jitter. Rendering the latest position makes entities jump. Instead, render every remote entity slightly in the past, between two known samples.
+Patches arrive at the game's publish rate (15 Hz by default) with network jitter. Rendering the latest position makes entities jump. Instead, render every remote entity slightly in the past, between two known samples.
 
 ```ts
 new ServerClock()
   sync(serverTime: number, localMs = performance.now())   // call on every world with world.time
-  now(delay = 0.1, localMs = performance.now()): number    // estimated server time minus `delay` s (0 before the first sync)
+  now(delay = clock.delay, localMs = performance.now()): number  // estimated server time minus `delay` s (0 before the first sync)
+  delay: number                                            // the automatic interpolation delay in seconds
 
 new Interpolator(angles: string[] = ['angle'], keep = 12)
   push(id, t, values: Record<string, number>)             // one sample per entity per world
@@ -526,7 +527,7 @@ new Interpolator(angles: string[] = ['angle'], keep = 12)
 
 `ServerClock` maps `world.time`, which only advances while the game is not paused, onto `performance.now()`. It keeps the fastest delivery seen as the estimate, drifts slowly towards later deliveries and snaps when the offset changes by more than 1 s. Fields listed in `angles` interpolate along the shortest arc. When time goes backwards for an entity (for example after a world reset), its track restarts. `sample` never extrapolates.
 
-Render at `clock.now(0.1)`. That is a 100 ms buffer: at 15 Hz there are always about 1.5 patch intervals of samples ahead of the render time, so moderate jitter is absorbed.
+Render at `clock.now()`. The clock measures the gap between patches (from `world.time`, so the server's publish rate) and how late patches arrive on this connection, and uses one patch interval plus the 90th percentile of that lateness plus 12 ms: about 80 ms at 15 Hz on a good network, about 30 ms at 60 Hz, more under jitter (at most 250 ms). It starts at 100 ms, grows quickly when patches run late and shrinks slowly, so the render time never jumps. Pass a number (`clock.now(0.15)`) to force a fixed buffer.
 
 ```ts
 // games/starter/src/client/scene.ts
@@ -543,7 +544,7 @@ update(world: World) {
 }
 
 private frame(dt: number) {
-  const renderTime = this.clock.now(0.1);
+  const renderTime = this.clock.now();
   this.enemies.forEach((object, enemy) => {
     const sample = this.tracks.sample(enemy.id, renderTime) ?? enemy;
     object.position.set(sample.x, 0, sample.z);
@@ -784,7 +785,7 @@ this.effects = new EffectsLayer(scene);
 // in update(world):
 this.effects.sync(world.effects);
 // in frame(dt):
-this.effects.update(this.clock.now(0.1));
+this.effects.update(this.clock.now());
 ```
 
 `Effect` is `{ id: number; type; time; x; z; y?; x2?; z2?; radius?; color?; text? }`. An effect becomes visible when the render time reaches `effect.time` and is removed after its renderer's `life`. Because effects are timestamped in server time and played at the interpolated render time, they line up with the interpolated entities. An effect is played once per id. Unknown types log one warning per type and are skipped. Effects more than 2 s in the future are dropped.
@@ -985,8 +986,8 @@ Production builds use `watchVersion` instead (see [watchVersion](#watchversion))
 | Listeners, timers or `requestAnimationFrame` outside the `Scope` | Handlers fire twice after an edit, and render loops and canvases pile up. | `scope.add`, `scope.listen`, `scope.interval`, and `stage.onFrame` instead of your own loop. |
 | No `if (net.world) …` after `keep` | After an edit the camera does not follow you and prediction stops. | Set `meId` from `net.id` and call `update(net.world)` once. |
 | Mutating a received world (`me.x += …`, `world.feed.sort()`) | The view drifts from the server, and "impossible" values appear later. | Keep local state in your own objects and copy before sorting. |
-| Drawing your own player from `sample()` | Movement feels delayed by the round trip plus 100 ms. | Predict it with the shared movement function and reconcile softly. |
-| Rendering at `clock.now(0)` or with the latest patch | Remote entities stutter. | Render at `clock.now(0.1)`. |
+| Drawing your own player from `sample()` | Movement feels delayed by the round trip plus the interpolation buffer. | Predict it with the shared movement function and reconcile softly. |
+| Rendering at `clock.now(0)` or with the latest patch | Remote entities stutter. | Render at `clock.now()`. |
 | Different movement code on the client and the server | Your character rubber-bands. | Import one function from `src/shared/rules.ts` on both sides. |
 | Sending `mz: move.y` with a top-down camera | W moves the character towards the camera. | Screen up is -z: `mz: -move.y`. |
 | Game keys while chatting | Typing "wasd" in the chat moves the character. | Check `ui.typing` (or `isTyping(event)`) before using input. |

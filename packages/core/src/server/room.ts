@@ -234,7 +234,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       if (!id) return;
       const snapshot = { world: this.viewFor(projectWorld(this.world, net), id), revision: ++this.revision };
       this.snapshots.set(client.sessionId, snapshot);
-      client.send('welcome', { id, game: game.name, version: runtime().loaded, protocol: PROTOCOL_VERSION, revision: snapshot.revision, host: this.world.hostId === id, world: snapshot.world } satisfies Welcome & { world: W });
+      client.send('welcome', { id, game: game.name, version: runtime().loaded, protocol: PROTOCOL_VERSION, revision: snapshot.revision, host: this.world.hostId === id, tickRate, world: snapshot.world } satisfies Welcome & { world: W });
     }
 
     /** `GameDefinition.view` applied to a projection (never to the authoritative world). */

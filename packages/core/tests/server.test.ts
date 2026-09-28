@@ -77,10 +77,13 @@ describe('game server', () => {
     const room = await new Client(url).joinById(roomId, { name: 'T', ticket: 'x'.repeat(24) });
     const notices: string[] = [];
     let world: World | undefined;
-    room.onMessage('welcome', message => { world = message.world; });
+    let tickRate: number | undefined;
+    room.onMessage('welcome', message => { world = message.world; tickRate = message.tickRate; });
     room.onMessage('patch', () => {});
     room.onMessage('notice', text => notices.push(text));
     await until(() => !!world);
+    // The client paces its input to the server's tick.
+    expect(tickRate).toBe(30);
     room.send('command', { type: 'ping' });
     await until(() => notices.includes('pong'));
     room.send('command', { type: 'crash' });

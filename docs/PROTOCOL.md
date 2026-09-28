@@ -7,10 +7,10 @@ WebSocket via Colyseus (MessagePack). Protocol version: `PROTOCOL_VERSION = 3` (
 | Direction | Type | Payload | Notes |
 | --- | --- | --- | --- |
 | C→S | `hello` | — | ask for a full snapshot (after a reconnect / a patch that did not fit) |
-| C→S | `input` | game input | continuous; `GameClient.input()` sends changes at most ~30/s and repeats the state every 150 ms; the server keeps the last input for 400 ms; validated by `parseInput` |
+| C→S | `input` | game input | continuous; `GameClient.input()` sends changes at most once per server tick (at most ~30/s; `tickRate` from `welcome`) and repeats the state every 150 ms; the server keeps the last input for 400 ms; validated by `parseInput` |
 | C→S | `command` | `{ type, ... }` | a discrete action → a module's `commands[type]` if one registered it, else `game.command`; types starting with `$` are engine commands (`$chat`, `$pause`, `$resume`) |
 | C→S | `request` | `{ id, name, payload }` | RPC → `game.requests[name]`, answered with `response` |
-| S→C | `welcome` | `{ id, game, version, protocol, revision, host, world }` | full world projection + your player id |
+| S→C | `welcome` | `{ id, game, version, protocol, revision, host, tickRate, world }` | full world projection + your player id; `tickRate` paces the client's input |
 | S→C | `patch` | `{ base, revision, values?, removed?, entities?, streams? }` | difference against `base`; a wrong `base` makes the client send `hello` |
 | S→C | `response` | `{ id, ok, result?, error? }` | |
 | S→C | `events` | `[[name, data], …]` | protocol 3+ clients: every client event of one server tick in one message, in order — `ctx.emit()` and bus events listed in `network.events`; never stored in the world (sounds, screen shake) |
@@ -87,7 +87,7 @@ const top = await net.request<Row[]>('scoreboard');
 net.stats; // { ping, patchesPerSecond, bytesPerSecond, inputsPerSecond, resyncs }
 ```
 
-Interpolation: `ServerClock.sync(world.time)` on every world and `clock.now(0.1)` to render 100 ms in the past; `Interpolator.push(id, world.time, {x, z, angle})` / `.sample(id, t)`. Predict your own character locally with the same movement function as the server (see `games/starter/src/shared/rules.ts` and `scene.ts`).
+Interpolation: `ServerClock.sync(world.time)` on every world and `clock.now()` to render just far enough in the past (one patch interval plus the measured jitter, ~80 ms at 15 Hz); `Interpolator.push(id, world.time, {x, z, angle})` / `.sample(id, t)`. Predict your own character locally with the same movement function as the server (see `games/starter/src/shared/rules.ts` and `scene.ts`).
 
 ## Chat
 
@@ -99,6 +99,31 @@ chat: {
   filter: (text, player) => text.replace(/darn/gi, '***'),   // null = drop the message
 },
 ```
+
+## Latency budget
+
+What a player feels is more than the distance to the server. For another player's movement, roughly:
+
+| Part | Default (30 Hz tick, `publishEvery: 2`) | Fast (`tickRate: 60, publishEvery: 1`) |
+| --- | --- | --- |
+| Network round trip (distance + routing; Poland → Frankfurt ~20 ms, Europe → US East ~90–110 ms) | RTT | RTT |
+| Input waits for the next tick (the client sends once per tick) | ~17 ms avg | ~8 ms |
+| The result waits for the next publish | ~33 ms avg | ~8 ms |
+| Interpolation buffer (`clock.now()`: one patch interval + jitter) | ~80 ms | ~30–45 ms |
+| Render frame | ~8–16 ms | ~8–16 ms |
+| **Total without the round trip** | **~140 ms** | **~60 ms** |
+
+Your own character feels instant only with client-side prediction (the shared movement function, see above); without it every key press waits a full round trip plus a tick.
+
+The fast settings are a game's choice in `defineGame`: they double the simulation cost and quadruple the patches per second (bandwidth, publish CPU). Use them for action games with few to tens of players; turn-based and slow games keep the defaults. Check with `npm run load` that `tickMsMax` stays under `1000 / tickRate` (16.7 ms at 60 Hz).
+
+Beyond the settings:
+
+- **Region.** One game = one room on one server: pick the region closest to most players. Nothing hides a 100 ms round trip to another continent.
+- **Packet loss.** WebSocket runs over TCP, so a lost packet holds back the ones behind it for a retransmit (a visible hitch). Interpolation absorbs short ones; there is no unreliable (UDP) channel.
+- **Proxies.** Point the game's domain straight at the server (on Cloudflare: "DNS only", not proxied); the local gateway and Caddy/Traefik add well under 1 ms.
+- **CPU.** A shared vCPU with noisy neighbours stretches ticks; watch `eventLoopDelayMs` and `tickMs.max` in `/gaime/stats` and move to a dedicated vCPU when p99 grows.
+- **`GAIME_LATENCY_MS`** simulates delay for testing only — keep it empty in production.
 
 ## Latency and load testing
 

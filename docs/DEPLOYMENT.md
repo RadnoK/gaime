@@ -32,6 +32,74 @@ npx gaime status
 
 The supervisor runs **committed code only** (git archive) and never touches the working tree. For participants on Tailscale share `http://<tailscale-ip>:5173`; with a DNS name set `GAIME_ALLOWED_HOSTS=name.tailnet.ts.net`. Settings can live in `games/<game>/.env` or in `.env` at the repo root (read by the supervisor).
 
+## From zero, in the terminal (Vultr)
+
+For a fork that should go online without clicking through a control panel. The whole setup is CLI commands an AI agent can run; a person only creates the account and one API key.
+
+**Why Vultr:** a Warsaw data centre (plus 9 US regions, Tokyo, Seoul, Singapore, India…), an official CLI that covers SSH keys, firewalls and servers, a Docker image, IPv4 included, hourly billing. A 2 vCPU / 4 GB server (`vc2-2c-4gb`) is about $20/month and holds a game with dozens of players; a dedicated vCPU (`voc-c-2c-4gb`, ~$40) removes tick jitter from noisy neighbours. Any other VPS works the same from step 5 on (see [other providers](#other-providers)).
+
+**Pick the region closest to most players** — it is the biggest part of the latency ([PROTOCOL.md → Latency budget](PROTOCOL.md#latency-budget)): `waw` Warsaw, `fra` Frankfurt, `ams` Amsterdam, `lhr` London, `ewr` New Jersey, `ord` Chicago, `lax` Los Angeles, `nrt` Tokyo, `sgp` Singapore (`vultr-cli regions list` for all).
+
+```sh
+# 0. Once, by a person: create an account at vultr.com, then Account → API → Enable API
+#    (allow all IPv4) and hand the key to the agent. Never commit it.
+export VULTR_API_KEY=…
+
+# 1. Tools on your machine (Linux: the release binary from github.com/vultr/vultr-cli)
+brew install vultr/vultr-cli/vultr-cli jq gh
+
+# 2. An SSH key for the server
+[ -f ~/.ssh/gaime ] || ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/gaime
+KEY=$(vultr-cli ssh-key create --name gaime --key "$(cat ~/.ssh/gaime.pub)" -o json | jq -r '.ssh_key.id')
+
+# 3. A firewall: only SSH and HTTP(S)
+FW=$(vultr-cli firewall group create --description gaime -o json | jq -r '.firewall_group.id')
+for port in 22 80 443; do vultr-cli firewall rule create "$FW" --protocol tcp --port $port --ip-type v4 --subnet 0.0.0.0 --size 0; done
+
+# 4. The server, and its address once it has one
+ID=$(vultr-cli instance create --region waw --plan vc2-2c-4gb --image docker --ssh-keys "$KEY" \
+     --firewall-group "$FW" --label gaime -o json | jq -r '.instance.id')
+until IP=$(vultr-cli instance get "$ID" -o json | jq -r '.instance.main_ip') && [ "${IP:-0.0.0.0}" != 0.0.0.0 ] && [ "$IP" != null ]; do sleep 5; done
+
+# 5. Install the game (any Ubuntu/Debian VPS with root SSH works from here)
+GAME=starter                                  # a directory in games/
+REPO=git@github.com:you/your-fork.git
+DOMAIN=${IP//./-}.sslip.io                    # or your own domain with an A record → $IP
+SSH_OPTS="-i $HOME/.ssh/gaime -o StrictHostKeyChecking=accept-new"
+until ssh $SSH_OPTS root@$IP true 2>/dev/null; do sleep 5; done
+scp $SSH_OPTS deploy/install.sh root@$IP:install.sh
+ssh $SSH_OPTS root@$IP 'docker compose version >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh'
+ssh $SSH_OPTS root@$IP "bash install.sh $GAME $DOMAIN $REPO --print-deploy-key" > /tmp/gaime-deploy-key.pub
+gh repo deploy-key add /tmp/gaime-deploy-key.pub --repo you/your-fork --title "gaime $GAME $IP"   # read-only
+ssh $SSH_OPTS root@$IP "bash install.sh $GAME $DOMAIN $REPO --mode live --proxy caddy"
+
+# 6. Wait until it answers (the first start runs npm ci and gets a certificate: a few minutes)
+until curl -fsS "https://$DOMAIN/health"; do sleep 10; done
+```
+
+From now on `git push origin main` is the deploy. Operations are in [the next section](#operations).
+
+The `-o json` output of `vultr-cli` is the source of truth: if a `jq` path prints `null`, read the JSON and use the field that holds the id or address. The commands are idempotent enough to re-run: `install.sh` keeps the key, the clone and `.env`; for a second server create a new instance (step 4 on).
+
+**Without a domain.** `<ip-with-dashes>.sslip.io` resolves to the server, so Caddy gets a real Let's Encrypt certificate without buying anything — good for jams and trying things. It shares one certificate rate limit with every sslip.io user in the world, so a public game should get its own domain: add an A record for it pointing at `$IP` at your registrar, set `DOMAIN` in `/srv/gaime/<game>/.env`, then `docker compose up -d`. Keep the domain "DNS only" (not proxied) on Cloudflare.
+
+**Public forks** can use an HTTPS URL (`https://github.com/you/your-fork.git`) and skip the deploy key; private ones need the SSH URL and the key. `gh repo deploy-key add` ties the key to your `gh` login: it disappears if you revoke the GitHub CLI app.
+
+**Tearing down:** `vultr-cli instance delete "$ID"` (billing stops; the checkpoint goes with the disk — copy `/srv/gaime/<game>/data/checkpoint.json` first if you want to keep the world), then `gh repo deploy-key list` / `delete`.
+
+### Other providers
+
+Steps 5–6 are the same on any VPS with Docker (or plain Ubuntu: the command above installs Docker). Only steps 2–4 change:
+
+| Provider | CLI | Closest to Poland | Notes |
+| --- | --- | --- | --- |
+| Hetzner Cloud | `hcloud` (`server create --image docker-ce`, `firewall`, `zone`) | Falkenstein / Nuremberg (~20 ms) | the cheapest and the smoothest CLI; in 2026 new customers were temporarily unable to create servers — check before recommending it |
+| Linode / Akamai | `linode-cli` (logs in through the browser — no key to copy) | Frankfurt (~25 ms) | broad US/Asia coverage |
+| DigitalOcean | `doctl` | Frankfurt (~25 ms) | |
+| Scaleway | `scw` (`scw login` in the browser) | Warsaw | EU only; IPv4 costs extra |
+
+Serverless and scale-to-zero platforms (Vercel, Cloudflare Workers, Lambda, free Render/Railway tiers) do not fit: a game is one long-running process with open WebSockets, a world in memory and a checkpoint on disk.
+
 ## A VPS with Docker (recommended)
 
 Once, on a server with Docker and a domain pointing at it:

@@ -183,11 +183,12 @@ export function applyWorldPatch<W extends object>(previous: WorldSnapshot<W> | u
 /**
  * Client-side input throttle: changed input goes out at most every `minMs`,
  * unchanged input is repeated every `keepAliveMs` so the server lease never expires.
+ * `GameClient` sets `minMs` to one server tick after `welcome`.
  */
 export class InputGate<I> {
   private previous?: string;
   private sentAt = -Infinity;
-  constructor(private readonly minMs = 33, private readonly keepAliveMs = 150) {}
+  constructor(public minMs = 33, private readonly keepAliveMs = 150) {}
   reset() { this.previous = undefined; this.sentAt = -Infinity; }
   next(input: I, now: number): I | undefined {
     const encoded = JSON.stringify(input);
