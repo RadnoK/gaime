@@ -36,7 +36,7 @@ Read the general rules in [../../AGENTS.md](../../AGENTS.md) and the simulation 
 | `wave.cleared` | `{ wave, bonus }` | no enemy alive and no `spawn:` timer left (sent to clients) |
 | `round.lost` | `{ wave, score }` | the crystal fell (sent to clients) |
 
-Module-private events: prefix them with your module id and add them to `Events` in `src/shared/types.ts` (the type is shared).
+Module-private events need no declaration: name them `<module-id>:<event>` (`ola-bomb:fuse`) and handle them in the same module. Events other modules should react to go into `Events` in `src/shared/types.ts`.
 
 ### Modifiers (`sim.modify(name, value, data)`, adjusted with `modify`)
 
@@ -52,8 +52,9 @@ Module-private events: prefix them with your module id and add them to `Events` 
 
 ### Rules for module code
 
+- Neighbours: `sim.nearestEnemy(at, range)`, `sim.nearestPlayer(at, range)`, `sim.enemiesNear(at, radius)` use the engine's shared spatial index — never loop over all enemies for every enemy.
 - Change the world through `Sim` (`hurtEnemy`, `hurtPlayer`, `hurtCrystal`, `heal`, `spawn`, `slow`, `enemySpeed`, `moveTowards`, `effect`, `emit`, `log`) — damage then goes through the modifiers, deaths trigger the events, and scoring stays in one place.
-- Later, once: a timer — `sim.after(3, '<event>', data, 'enemy:<id>:<module-id>-…')`. Timers of an enemy keyed `enemy:<id>:…` are cancelled when it dies. Durations read on demand (slows, buffs): kit `status` in `enemy.data` / `player.data`.
+- Later, once: a timer — `sim.after(3, '<event>', data, { key: 'enemy:<id>:<module-id>-…' })`. Timers of an enemy keyed `enemy:<id>:…` are cancelled when it dies. Durations read on demand (slows, buffs): kit `status` in `enemy.data` / `player.data`.
 - Periodic: a module system with `every: seconds`, never `world.time % n`.
 - An enemy with no wave that summons it never appears — add `waves` as well (or use an existing one).
 - Keep module state in `enemy.data['<module-id>-…']` / `player.data['<module-id>-…']` (number/string/boolean only).

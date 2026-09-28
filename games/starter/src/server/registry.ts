@@ -12,6 +12,8 @@ export const registry = createRegistry<Kinds>(modules, {
         if (!Number.isFinite(def[key]) || def[key] < 0) throw new Error(`enemies/${def.id}: "${key}" must be a non-negative number.`);
       }
       if (def.hp <= 0 || def.radius <= 0) throw new Error(`enemies/${def.id}: hp and radius must be positive.`);
+      // Crowd separation searches neighbours this far (simulation.ts MAX_ENEMY_RADIUS).
+      if (def.radius > 2.5) throw new Error(`enemies/${def.id}: radius must be at most 2.5.`);
       if (!def.visual?.shape) throw new Error(`enemies/${def.id}: missing visual.shape.`);
     },
     abilities(def) {

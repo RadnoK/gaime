@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { seeded } from '@gaime/core';
-import { testGame } from '@gaime/core/server';
+import { replay, testGame } from '@gaime/core/server';
 import { game } from '../src/server/game';
 import { registry } from '../src/server/registry';
 import { createWorld, SCHEMA } from '../src/server/simulation';
@@ -30,7 +30,8 @@ describe('starter', () => {
     expect(registry.lists.enemies.length).toBeGreaterThan(0);
     expect(registry.lists.waves.length).toBeGreaterThan(0);
     for (const id of RULES.defaultAbilities) expect(registry.kinds.abilities[id]).toBeDefined();
-    expect(JSON.parse(JSON.stringify(createWorld()))).toEqual(createWorld());
+    const fresh = createWorld();
+    expect(JSON.parse(JSON.stringify(fresh))).toEqual(fresh);
     const t = setup();
     expect(t.world.catalog.length).toBe(registry.catalog.length);
   });
@@ -255,5 +256,22 @@ describe('starter', () => {
     expect(t.chat(ola, '/report')).toBe('Analysing…');
     await t.flushJobs();
     expect(t.feed().some(text => text.startsWith('📡 Report: biggest threat'))).toBe(true);
+  });
+});
+
+describe('determinism', () => {
+  test('a recorded session (humans, bots, waves, abilities) replays exactly', () => {
+    const t = testGame(game, { seed: 11, record: true });
+    const ada = t.join('Ada');
+    t.addBot('Robo'); t.addBot('Beep');
+    t.command(ada, { type: 'start' });
+    for (let second = 0; second < 40; second++) {
+      t.input(ada, { mx: Math.sin(second), mz: Math.cos(second), ax: 5, az: 5, fire: second % 2 === 0 });
+      if (second % 9 === 0) t.command(ada, { type: 'cast', slot: 0, x: 3, z: 3 });
+      t.run(1);
+    }
+    const result = replay(game, JSON.parse(JSON.stringify(t.recording())));
+    expect(result.diverged).toBeUndefined();
+    expect(JSON.stringify(result.world)).toBe(JSON.stringify(t.world));
   });
 });

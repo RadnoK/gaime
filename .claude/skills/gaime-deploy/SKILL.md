@@ -60,6 +60,8 @@ Several games per server are fine (separate directories/ports/domains). Without 
 
 Latency: the server region matters most — one game runs on one server, so host near most players; keep the domain unproxied (Cloudflare "DNS only"). Game-side tuning is in the `gaime-networking` skill.
 
+Scaling out: a game with `rooms: { mode: 'matches' }` can run several game processes behind the gateway with one Redis (`GAIME_MODE=release`, `GAIME_PROCESSES=n`, `compose.redis.yml` added to `COMPOSE_FILE`) — `docs/DEPLOYMENT.md#scaling-out`, `docs/ROOMS.md#scaling-out-with-redis`. A shared game always runs in one process. Rooms of a running game: `gaime rooms`; every admin command takes `--room <id|code>`.
+
 ## Modes
 
 - `GAIME_MODE=live` (default): Vite on the server, pushes hot-reload in ~3 s without disconnecting anyone. Best for jams and fast iteration.
@@ -70,15 +72,16 @@ Latency: the server region matters most — one game runs on one server, so host
 
 - Changes to `packages/host` (the supervisor itself): `docker compose restart game`.
 - Changes to `deploy/docker/*`: re-run `install.sh` (idempotent) or copy the file and `docker compose up -d`.
-- Restoring an old save: stop the game, copy a file from `backups/` or `repo/.gaime/<game>/snapshots/` to `data/checkpoint.json`, start it.
+- Restoring an old save: stop the game, copy a file from `backups/` or `repo/.gaime/<game>/snapshots/` to `data/checkpoint.json`, start it. (Shared games only — match worlds are never saved, and a restart or a release deploy ends running matches.)
+- A bug report from players: `gaime replay "<what happened>"` right away saves the last minutes to `data/replays/` (the server also saves one by itself after every error); hand the file to whoever debugs it (`gaime-debug` skill).
 
 ## Pitfalls
 
 - Never `git reset` inside `/srv/gaime/<game>/repo` or edit `.gaime/` by hand.
-- Never delete `data/` (saves, admin token).
+- Never delete `data/` (saves, admin token, recordings).
 - A dependency change (lockfile) means `npm ci` + a restart for everyone instead of a hot reload — batch them.
 - Load tests against the public game disturb real players — ask first.
 
 ## Reference
 
-`docs/DEPLOYMENT.md`, `docs/reference/CLI.md` (host, status, rollback, resume, redeploy), `docs/reference/CONFIG.md` (environment variables).
+`docs/DEPLOYMENT.md`, `docs/ROOMS.md` (matches, Redis), `docs/reference/CLI.md` (host, status, rollback, resume, redeploy, rooms, replay), `docs/reference/CONFIG.md` (environment variables).

@@ -1,4 +1,4 @@
-import { Client, type Room } from '@colyseus/sdk';
+import { Client, type Room, type SeatReservation } from '@colyseus/sdk';
 import type { BaseWorld, Welcome } from '../shared/types';
 import { CLOSE_REMOVED, CLOSE_REPLACED } from '../shared/types';
 import { JOIN_PROTOCOL, PROTOCOL_VERSION, type EngineCommand, type EventMessage, type ResponseMessage } from '../shared/protocol';
@@ -31,6 +31,24 @@ export interface GameClientOptions {
    * Defaults come from the URL: `?lag=150&jitter=40&loss=5` (round trip ms, ± ms, % of dropped inputs).
    */
   simulate?: { lag?: number; jitter?: number; loss?: number };
+  /**
+   * Games with `rooms: { mode: 'matches' }`: which match to enter. Default: `?code=` from the page URL
+   * (a private match), else public matchmaking. `create: 'private'` opens a new invite-only match
+   * (share `net.invite`). Shared games ignore it.
+   */
+  match?: { code?: string; create?: 'private' };
+}
+
+/** The room this client plays in (`net.room`). */
+export interface RoomInfo {
+  id: string;
+  /** Invite code of a private match. */
+  code?: string;
+}
+
+/** `/gaime/room` refused the join (HTTP status + the server's reason). */
+class JoinError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
 }
 
 export interface NetStats {
@@ -62,9 +80,9 @@ function makeTicket() {
 }
 
 /**
- * Connection to the game's single shared room: identity, automatic reconnection
- * (network drops, server hot reloads and restarts), delta patches, throttled input,
- * RPC requests, server events and optional network simulation.
+ * Connection to the game's room — the shared room, or a match (`rooms: matches`): identity,
+ * matchmaking and invite codes, automatic reconnection (network drops, server hot reloads and
+ * restarts), delta patches, throttled input, RPC requests, server events and optional network simulation.
  */
 export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends { type: string } = { type: string }, E extends Record<string, any> = Record<string, any>> {
   id = '';
@@ -78,7 +96,9 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
   private readonly storageKey: string;
   private readonly store: Storage;
   private readonly simulate: { lag: number; jitter: number; loss: number };
-  private room?: Room;
+  private session?: Room;
+  private current?: RoomInfo;
+  private match: { code?: string; create?: 'private' };
   private snapshot?: WorldSnapshot<W>;
   private resyncing = false;
   private stopped = true;
@@ -108,6 +128,8 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
       loss: Math.min(100, options.simulate?.loss ?? number('loss')),
     };
     if (this.simulated) console.info('[gaime] simulated network', this.simulate);
+    const code = options.match?.code ?? params.get('code') ?? undefined;
+    this.match = { ...(code ? { code } : {}), ...(options.match?.create ? { create: options.match.create } : {}) };
   }
 
   private get simulated() { return this.simulate.lag > 0 || this.simulate.jitter > 0 || this.simulate.loss > 0; }
@@ -131,6 +153,17 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
   off() { for (const set of Object.values(this.listeners)) set.clear(); }
 
   get connected() { return this.state === 'connected'; }
+  /** The room joined last: its id and, for a private match, the invite code. */
+  get room(): RoomInfo | undefined { return this.current; }
+  /** A link to this page that brings a friend into the same private match (`?code=`); undefined elsewhere. */
+  get invite(): string | undefined {
+    if (!this.current?.code) return undefined;
+    const url = new URL(location.href);
+    url.searchParams.set('code', this.current.code);
+    url.searchParams.delete('player');
+    url.hash = '';
+    return url.href;
+  }
   get ticket() {
     let ticket = this.store.getItem(`${this.storageKey}:ticket`);
     if (!ticket) { ticket = makeTicket(); this.store.setItem(`${this.storageKey}:ticket`, ticket); }
@@ -171,7 +204,7 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
     if (this.joining || this.stopped) return;
     this.joining = true;
     clearTimeout(this.retry);
-    this.setState(this.room ? 'reconnecting' : 'connecting');
+    this.setState(this.session ? 'reconnecting' : 'connecting');
     try {
       let room: Room | undefined;
       const token = sessionStorage.getItem(`${this.storageKey}:reconnect`);
@@ -179,22 +212,45 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
         try { room = await this.sdk.reconnect(token); }
         catch { sessionStorage.removeItem(`${this.storageKey}:reconnect`); }
       }
-      if (!room) {
-        const response = await fetch(this.roomUrl, { cache: 'no-store' });
-        if (!response.ok) throw new Error(`Game server unavailable (${response.status}).`);
-        const { roomId } = await response.json() as { roomId: string };
-        room = await this.sdk.joinById(roomId, { name: this.name, ticket: this.ticket, [JOIN_PROTOCOL]: PROTOCOL_VERSION });
-      }
+      room ??= await this.enter();
       if (this.stopped) { room.reconnection.enabled = false; void room.leave(true).catch(() => {}); return; }
       this.attach(room);
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      if (/full|403/i.test(text)) { this.setState('full', text); return; }
+      if ((error instanceof JoinError && error.status === 403) || /full|403/i.test(text)) { this.setState('full', text); return; }
+      // No such match (a wrong or expired invite code): retrying cannot help.
+      if (error instanceof JoinError && (error.status === 404 || error.status === 400)) { this.stopped = true; this.setState('error', text); return; }
       this.setState('error', text);
       if (!this.stopped) this.retry = setTimeout(() => void this.connect(), 2000);
     } finally {
       this.joining = false;
     }
+  }
+
+  /**
+   * Find a room and a seat in one request (`POST /gaime/room`): back into the room of this tab if it
+   * still takes us, else the match given by `match`, else public matchmaking (or the shared room).
+   */
+  private async enter(): Promise<Room> {
+    const body = { ticket: this.ticket, name: this.name, protocol: PROTOCOL_VERSION, room: sessionStorage.getItem(`${this.storageKey}:room`) ?? undefined, ...this.match };
+    const response = await fetch(this.roomUrl, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const json = /json/.test(response.headers.get('content-type') ?? '');
+    // A server from before matchmaking: the shared room by id.
+    if (!json && (response.status === 404 || response.status === 405)) return this.enterShared();
+    const answer = (json ? await response.json() : {}) as { roomId?: string; code?: string; reservation?: SeatReservation; error?: string };
+    if (!response.ok || !answer.reservation || !answer.roomId) throw new JoinError(response.status, answer.error ?? `Game server unavailable (${response.status}).`);
+    this.current = { id: answer.roomId, ...(answer.code ? { code: answer.code } : {}) };
+    // Later rejoins go back by room id; if that match is gone, a private one is looked up by its code (never created again).
+    this.match = answer.code ? { code: answer.code } : {};
+    return this.sdk.consumeSeatReservation(answer.reservation);
+  }
+
+  private async enterShared(): Promise<Room> {
+    const response = await fetch(this.roomUrl, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Game server unavailable (${response.status}).`);
+    const { roomId } = await response.json() as { roomId: string };
+    this.current = { id: roomId };
+    return this.sdk.joinById(roomId, { name: this.name, ticket: this.ticket, [JOIN_PROTOCOL]: PROTOCOL_VERSION });
   }
 
   /** Simulated one-way delay; order is preserved like on a real TCP connection. */
@@ -206,11 +262,11 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
   }
 
   private transmit(type: string, payload?: unknown) {
-    const room = this.room;
+    const room = this.session;
     if (!room) return;
     if (!this.simulated) { room.send(type, payload); return; }
     if (type === 'input' && Math.random() * 100 < this.simulate.loss) return;
-    setTimeout(() => { if (this.room === room && this.connected) room.send(type, payload); }, this.delay('sendAt'));
+    setTimeout(() => { if (this.session === room && this.connected) room.send(type, payload); }, this.delay('sendAt'));
   }
 
   private listen<T>(room: Room, type: string, handler: (data: T) => void) {
@@ -221,17 +277,21 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
   }
 
   private attach(room: Room) {
-    this.room = room;
-    const mine = () => this.room === room && !this.stopped;
-    const remember = () => sessionStorage.setItem(`${this.storageKey}:reconnect`, room.reconnectionToken);
+    this.session = room;
+    const mine = () => this.session === room && !this.stopped;
+    const remember = () => {
+      sessionStorage.setItem(`${this.storageKey}:reconnect`, room.reconnectionToken);
+      sessionStorage.setItem(`${this.storageKey}:room`, room.roomId);
+    };
     remember();
     room.reconnection.minUptime = 0;
     room.reconnection.maxRetries = 8;
     room.reconnection.maxDelay = 1000;
 
-    this.listen<Welcome & { world: W }>(room, 'welcome', data => {
+    this.listen<Welcome & { world: W; room?: RoomInfo }>(room, 'welcome', data => {
       if (!mine()) return;
       remember();
+      if (data.room?.id) this.current = { id: data.room.id, ...(data.room.code ? { code: data.room.code } : {}) };
       this.id = data.id;
       this.snapshot = { world: data.world, revision: data.revision };
       this.resyncing = false;
@@ -293,7 +353,7 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
 
     clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => {
-      if (this.connected && this.room === room) room.ping(ms => { this.ping = ms + (this.simulated ? this.simulate.lag : 0); });
+      if (this.connected && this.session === room) room.ping(ms => { this.ping = ms + (this.simulated ? this.simulate.lag : 0); });
     }, 2000);
     this.setState('connected');
   }
@@ -306,7 +366,8 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
     this.stopped = true;
     sessionStorage.removeItem(`${this.storageKey}:reconnect`);
     sessionStorage.removeItem(`${this.storageKey}:active`);
-    if (this.room) this.room.reconnection.enabled = false;
+    sessionStorage.removeItem(`${this.storageKey}:room`);
+    if (this.session) this.session.reconnection.enabled = false;
     this.setState(state);
   }
 
@@ -330,7 +391,7 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
 
   /** Continuous input (movement, aim). Throttled; repeated while unchanged so the server keeps it. */
   input(input: I) {
-    if (!this.connected || !this.room) return;
+    if (!this.connected || !this.session) return;
     const next = this.gate.next(input, performance.now());
     if (next === undefined) return;
     this.count(this.counters.inputs);
@@ -342,7 +403,7 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
    * and are not part of the game's `Command` type: they are accepted as `{ type: 'mod-x', … }`.
    */
   command(command: C | EngineCommand | { type: `${string}-${string}`; [key: string]: unknown }): boolean {
-    if (!this.connected || !this.room) return false;
+    if (!this.connected || !this.session) return false;
     this.transmit('command', command);
     return true;
   }
@@ -351,7 +412,7 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
 
   /** RPC to `GameDefinition.requests[name]`; resolves with its return value. */
   request<T = unknown>(name: string, payload?: unknown, timeout = 5000): Promise<T> {
-    if (!this.connected || !this.room) return Promise.reject(new Error('Not connected.'));
+    if (!this.connected || !this.session) return Promise.reject(new Error('Not connected.'));
     const id = ++this.requestSeq;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Request "${name}" got no answer within ${timeout} ms.`)); }, timeout);
@@ -360,15 +421,16 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
     });
   }
 
-  /** Leave on purpose: the character stays in the world (unless the game frees seats). */
+  /** Leave on purpose: the character stays in the world (unless the game frees seats). The next `join` finds a new match. */
   async leave() {
     this.stopped = true;
     clearTimeout(this.retry); clearInterval(this.pingTimer);
     this.rejectPending('Left the game.');
     sessionStorage.removeItem(`${this.storageKey}:active`);
     sessionStorage.removeItem(`${this.storageKey}:reconnect`);
-    const room = this.room;
-    this.room = undefined;
+    sessionStorage.removeItem(`${this.storageKey}:room`);
+    const room = this.session;
+    this.session = undefined;
     if (room) {
       room.reconnection.enabled = false;
       await Promise.race([room.leave(true).catch(() => {}), new Promise(resolve => setTimeout(resolve, 1200))]);
@@ -383,7 +445,7 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
     clearTimeout(this.retry); clearInterval(this.pingTimer);
     this.rejectPending('Closed.');
     this.off();
-    if (this.room) { this.room.reconnection.enabled = false; this.room.connection.close(); }
+    if (this.session) { this.session.reconnection.enabled = false; this.session.connection.close(); }
   }
 }
 

@@ -30,9 +30,11 @@ Everything hot-reloads: change a file in `games/starter/src/` while playing and 
 ```text
 packages/core/      the engine — @gaime/core, @gaime/core/{server,client,three,kit,ui,audio,worker,vite}
 packages/host/      the gaime CLI: deploy supervisor, smoke/load tests, admin, `gaime new`
+packages/physics/   @gaime/physics: optional rigid-body physics (Rapier 2D)
 games/blank/        the smallest complete game — the default template
 games/starter/      Crystal: a co-op defense game with most features in use
 games/duel/         Duel: turn-based artillery with seats, rounds, projectiles
+games/bumper/       Bumper: a physics sumo arena (@gaime/physics), rounds, bots
 deploy/             Docker Compose, nginx gateway, Traefik/Caddy, systemd, backups
 docs/               this documentation
 .claude/skills/     playbooks for AI agents (docs/SKILLS.md)

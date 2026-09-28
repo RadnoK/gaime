@@ -1,4 +1,4 @@
-export { GameClient, type ConnectionState, type GameClientOptions, type NetStats } from './client';
+export { GameClient, type ConnectionState, type GameClientOptions, type NetStats, type RoomInfo } from './client';
 export { watchVersion } from './version';
 export { Keyboard, Pointer, isTyping } from './input';
 export { Controls, TouchControls, WASD, PAD_BUTTONS, type Binding, type AxisBinding, type ControlsOptions, type TouchControlsOptions } from './controls';

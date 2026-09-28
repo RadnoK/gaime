@@ -14,8 +14,10 @@ For the concepts behind these settings, see [SIMULATION.md](../SIMULATION.md), [
 
 - [GameDefinition](#gamedefinition)
 - [GameContext](#gamecontext)
+- [World fields](#world-fields)
 - [Module behaviour](#module-behaviour)
 - [Engine limits](#engine-limits)
+- [testGame and replay](#testgame-and-replay)
 - [ChatCommand, AdminCommand, RequestHandler](#chatcommand-admincommand-requesthandler)
 - [NetworkConfig](#networkconfig)
 - [Vite plugin `gaime()`](#vite-plugin-gaime)
@@ -45,6 +47,10 @@ Defaults are applied in `packages/core/src/server/room.ts` and `engine.ts`.
 | `inputLeaseMs` | `number` | `400` | Continuous input older than this is dropped, so the player stops. The client repeats unchanged input every 150 ms to keep the lease. |
 | `maxMessagesPerSecond` | `number` | `90` | Messages per second one client may send before Colyseus disconnects it. |
 | `network` | `NetworkConfig` | see [below](#networkconfig) | What is synchronised and how. |
+| `rooms` | `{ mode: 'shared' } \| { mode: 'matches'; size: number; private?: boolean }` | `{ mode: 'shared' }` | `shared`: one persistent room (checkpoint). `matches`: rooms of `size` human seats (a whole number ≥ 1; bots do not count), matchmaking, invite codes (`private: false` turns private matches off), `ctx.lockRoom`, ephemeral worlds, closed when empty. [ROOMS.md](../ROOMS.md). |
+| `spatial` | `Record<string, SpatialOptions>` | none | Top-level `Record<id, { x, z }>` collections the engine keeps a shared spatial index for (`ctx.near`, `ctx.nearest`, `ctx.reindex`), e.g. `{ enemies: { cell: 4 }, players: {} }`. Each index is rebuilt at most once per tick, for every system and module together. `SpatialOptions`: `cell` (grid cell size, default `4` — about the typical query radius), `margin` (how far an entity may have moved since the index was built and still be found, default `1`), `maxRadius` (default radius of `nearest`, default `Infinity`). Querying a collection that is not listed throws. [SIMULATION.md](../SIMULATION.md#spatial-index). |
+| `budget` | `{ moduleMs?: number; enabled?: boolean }` | on, `moduleMs` = 20% of the tick (6.7 ms at 30 Hz) | Time budget per module: a module whose systems and handlers cost more than `moduleMs` per tick (averaged over a second) gets its **systems** throttled — every 2nd, then 4th, then 8th tick — until it recovers; its handlers and modifiers keep running. Game-owned code is never throttled. `enabled: false` turns budgets off. Off in tests and replays (it measures wall-clock time). [SIMULATION.md](../SIMULATION.md#module-time-budgets). |
+| `record` | `{ enabled?: boolean; minutes?: number }` | on, `10` minutes | Flight recorder: keeps the last `minutes` of inputs, commands and other external entries so a session can be replayed with `replay()`. Saved to `<data>/replays/` automatically when the game pauses on an error or a module is switched off, and with `gaime replay`. `enabled: false` turns it off (`gaime replay` then fails). [SIMULATION.md](../SIMULATION.md#determinism-and-replays). |
 
 ### Hooks
 
@@ -102,7 +108,7 @@ export const game = defineGame<World, Input, Sim, Events, Modifiers>({
 | `log(text)` | A message in the world feed, visible to everyone. |
 | `notify(playerId, text)` | A private toast (`notice` message) for one player. |
 | `nextId(): number` | A fresh monotonic id (increments `world.seq`, persisted). |
-| `random(): number` | A random number in [0, 1). In the room this is `Math.random`, which is not seeded. |
+| `random(): number` | A random number in [0, 1) from the world's own generator (mulberry32, state in `world.rng`, saved with the world): deterministic for the same world and inputs, so recordings replay exactly. Seed it in tests with `testGame(game, { seed })`. Never use `Math.random()` in simulation code. |
 | `isHost(playerId)` | True for `world.hostId`. When the host goes offline, the role passes to the first online human player. |
 | `removePlayer(playerId)` | Deletes the player and closes their connections. |
 | `save()` | Asks for a checkpoint on the next tick. The engine also saves every ~2 s while time moves. |
@@ -121,8 +127,24 @@ export const game = defineGame<World, Input, Sim, Events, Modifiers>({
 | `timers(prefix?): number` | Number of live timers, optionally only those whose key starts with `prefix`. |
 | `isolate<T>(owner, run): T \| undefined` | Runs `run` as code of module `owner`: an exception switches that module off (feed, `/health` → `disabled`) instead of pausing the game. Returns `undefined` when it threw or the module is already off. Owner `'game'` behaves like game code (an exception pauses). Use it for definition hooks: `ctx.isolate(registry.owner['pickups/' + def.id], () => def.onPickup(...))`. |
 | `disabled(owner): boolean` | Whether module `owner` is switched off after an error (until the next code load). |
+| `resource<T>(key, create, options?): T` | A value derived from the world that is not saved (a physics world, a navigation grid, a cache). `create()` runs on first use; the value is kept for the lifetime of the loaded code and recreated after a hot reload or restart, so `create` must rebuild it from world data. `options` is a `dispose(value)` function or `ResourceOptions` (below). Keys are global: prefix them with the module id. [SIMULATION.md](../SIMULATION.md#resources). |
+| `near<T>(collection, at, radius, filter?): T[]` | Entities of a `spatial` collection within `radius` of `at` — exact distance, current positions (an entity moved earlier in the tick is found within the collection's `margin`; a deleted one is skipped), in no particular order. Entities added in this tick appear from the next one, or after `reindex`. |
+| `nearest<T>(collection, at, radius?, filter?): T \| undefined` | The closest entity of a `spatial` collection within `radius` (default: the collection's `maxRadius`; unbounded searches widen through the index, then scan). |
+| `reindex(collection)` | Rebuilds that spatial index now — after adding many entities that must be found in the same tick. |
+| `room: { id, code? }` | The room this world lives in; `code` is the invite code of a private match. `testGame`: `{ id: 'local' }`. |
+| `lockRoom(locked)` | Matches mode: `true` keeps new players out (matchmaking, codes, `joinById`); players who already have a character still get back in. `false` opens the room again. Shared mode: no effect. [ROOMS.md](../ROOMS.md#locking). |
 
 Timers keyed `player:<id>:…` are cancelled when that player is removed. Keys are the only handle on a timer — prefix them with their owner (`bomb:<id>`, `ola-swamp:<enemy>:burn`).
+
+```ts
+interface ResourceOptions<T> {
+  dispose?(value: T): void;        // the code is being replaced (hot reload, shutdown): free memory, close handles
+  save?(value: T): unknown;        // state NOT in the world, for flight recordings (JSON or structured-clonable); undefined = nothing
+  load?(data: unknown): T;         // rebuild the value from `save`'s output when a replay starts; without it `create` runs
+}
+```
+
+`save` is called when the recorder starts a segment (never for checkpoints); `load` only in `replay()`. `@gaime/physics` uses them to put Rapier's snapshot into recordings ([PHYSICS.md](../PHYSICS.md#recordings-and-replays)).
 
 ### Engine events
 
@@ -134,6 +156,26 @@ Triggered by the engine on every game's bus (`EngineEvents` in `@gaime/core`); r
 | `player.online` | `{ player: string }` | a connection came up: join, reconnect, a bot added (after `onPlayerOnline`) |
 | `player.offline` | `{ player: string }` | a connection dropped; the character stays unless the game removes it |
 | `player.removed` | `{ player: string; name: string }` | the player is being deleted: kick, freed seat, `ctx.removePlayer` (after `onPlayerRemoved`, before the player and its `player:<id>:` timers are gone — handlers run after that, so look the player up defensively) |
+
+---
+
+## World fields
+
+`BaseWorld` (`packages/core/src/shared/types.ts`); `baseWorld(SCHEMA)` from `@gaime/core` creates them. The engine owns every field except `schema` and `players`.
+
+| Field | Type | Sent to clients | Meaning |
+| --- | --- | --- | --- |
+| `schema` | `number` | yes | Your save schema number (bump it with a migration). |
+| `version` | `string` | yes | Code version that last ran this world. |
+| `time` | `number` | yes | Simulation time in seconds; advances by exactly `1 / tickRate` per tick, stops while paused. |
+| `tick` | `number` | yes | Simulation steps since the world was created. |
+| `pause` | `{ reason: 'host' \| 'error'; message? } \| null` | yes | Why the simulation is paused. |
+| `hostId` | `string \| null` | yes | The game host (first online human). |
+| `players` | `Record<id, Player>` | yes | Every player, online or not. |
+| `feed` | `FeedItem[]` | yes (stream) | The last 40 feed and chat items. |
+| `seq` | `number` | yes | Counter behind `ctx.nextId()`. |
+| `schedule` | `Schedule` | **no** (always hidden) | Engine timers (`ctx.after` / `ctx.every`), saved with the world. |
+| `rng` | `number` | **no** (always hidden) | State of the world's random generator behind `ctx.random()` (mulberry32), saved with the world. `baseWorld` seeds it randomly; `testGame(game, { seed })` sets it. Older saves without it get a seed from `createWorld()` on load. |
 
 ---
 
@@ -163,10 +205,14 @@ Handlers, modifiers and systems of a switched-off module are skipped; its comman
 
 ## Engine limits
 
-Constants in `packages/core/src/server/engine.ts` and `room.ts`. They are not configurable per game; they exist so a bug or a traffic spike degrades one part of the game instead of stopping it.
+Constants in `packages/core/src/server/engine.ts`, `recorder.ts` and `room.ts`. Apart from the module budget and the recording window (`GameDefinition.budget`, `GameDefinition.record`) they are not configurable per game; they exist so a bug or a traffic spike degrades one part of the game instead of stopping it.
 
 | Limit | Value | What happens when it is reached |
 | --- | --- | --- |
+| Module time budget (`budget.moduleMs`) | 20% of the tick (6.7 ms at 30 Hz) | Reviewed once a second from each module's average cost per tick (systems + handlers). Over budget → its systems run every 2nd tick, then 4th, at most every 8th (staggered, `dt` covers the skipped time); back to the next lower factor when cost × factor drops under half the budget. Each change is a feed line and `/gaime/stats` → `throttled`. Handlers, modifiers and game-owned systems are never skipped. |
+| Flight recorder segments | 3 kept, each half the `record.minutes` window (at least 300 ticks) | A new segment (with a world snapshot) starts when the current one is full, or early after 100 000 entries — under heavy traffic the window gets shorter instead of the memory growing. The oldest segment is dropped. |
+| Replay checks | every 150 ticks (5 s at 30 Hz) | A world hash is stored; `replay()` compares it and reports the first mismatch as `diverged`. |
+| Saved recordings | `<data>/replays/`, newest 20 kept | Automatic saves (game paused on an error, a module switched off) happen at most once a minute per room; `gaime replay` always saves. |
 | Events per dispatch cycle (`MAX_EVENTS_PER_TICK`) | 50 000 | An event storm: `trigger` throws in the code that raised the event and the queue is dropped. A module is switched off; game code pauses the game. Usually a handler triggering the event it handles. |
 | Timers fired per tick (`MAX_TIMERS_PER_TICK`) | 5 000 | The rest fire on the following ticks (in time order); `engine.deferredTimers` in `/gaime/stats` counts such ticks. |
 | Clock catch-up (`MAX_CATCH_UP`) | 3 ticks | After a slow tick the room runs up to 3 steps at once; beyond that the simulated time is dropped (the game slows down briefly) and added to `droppedMs`. |
@@ -174,6 +220,38 @@ Constants in `packages/core/src/server/engine.ts` and `room.ts`. They are not co
 | Send buffer (backpressure) | 64 KB | A client whose socket buffer exceeds it is skipped for patches until it drains. |
 | Checkpoint interval | ~2 s | While time moves or something changed; also before a hot reload and on shutdown. |
 | Feed length | 40 items | Older items are dropped. |
+
+## testGame and replay
+
+From `@gaime/core/server`. The concepts and examples are in [TESTING.md](../TESTING.md#testgamegame-options) and [SIMULATION.md](../SIMULATION.md#determinism-and-replays).
+
+`testGame(game, options?)` options:
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `seed` | `number` | random (from `createWorld()`) | Seeds `world.rng`, the generator behind `ctx.random`: the same seed plays the same game, and the run can be recorded and replayed. |
+| `random` | `() => number` | the world's generator | Replaces `ctx.random` altogether (e.g. `seeded(n)`). Reproducible, but a recording of such a run does not replay (the replay uses `world.rng`). Prefer `seed`. |
+| `record` | `boolean \| { maxEntries?: number }` | `false` | Keep a flight recording (window: `game.record.minutes`, default 60 in tests) for `t.recording()`. `maxEntries` starts segments early (to test rotation). |
+| `budget` | `boolean` | `false` | Enforce module time budgets (they measure wall-clock time). |
+| `world` | `unknown` | `createWorld()` | Start from this world; it is hydrated and migrated like a save. |
+| `strict` | `boolean` | `true` | Throw errors of module and game code instead of switching modules off or pausing. |
+
+Members besides the drivers (`join`, `leave`, `remove`, `addBot`, `input`, `tick`, `run`, `command`, `chat`, `request`, `act`, `flushJobs`) and the inspectors (`world`, `player`, `ctx`, `sim`, `triggered`, `triggeredOf`, `events`, `notices`, `feed`, `disabled`, `clear`, `engine`):
+
+| Member | Meaning |
+| --- | --- |
+| `admin(name, ...args)` | Runs `GameDefinition.admin[name]` as the operator would (`gaime admin <name> …`); recorded, so replays include it. |
+| `recording(reason = 'test'): Recording` | The flight recording so far (needs `record`). Feed it to `replay`. Throws without `record`. |
+
+`replay(game, recording, options?)`:
+
+| | |
+| --- | --- |
+| `options.until` | Stop at this tick (default: the end of the recording). |
+| `options.onTick(world, tick)` | Called after every replayed tick — inspect, collect data, set a breakpoint. |
+| Result | `{ world, engine, ticks, verified, diverged? }`: the final world, the replay engine, ticks run, checks (hashes and segment snapshots) that matched, and the first mismatch `{ tick, expected, actual }`. |
+
+It throws when the recording belongs to another game (`recording.game`) or has no segments. A recording is plain JSON (`Recording`: `format`, `game`, `version`, `tickRate`, `savedAt`, `reason`, `segments`); `reason` ends with `(incomplete: …)` when something non-replayable happened while recording. `worldHash(world)` is the hash the checks use.
 
 ## ChatCommand, AdminCommand, RequestHandler
 
@@ -267,14 +345,18 @@ Environment variables read by the plugin:
 | Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `game` | `string` | required | The same value as `GameDefinition.name`. It prefixes the browser storage keys (`gaime:<game>`). |
-| `url` | `string` | `location.origin` | Game server address, `http(s)://` or `ws(s)://`. Used for the WebSocket and for `GET /gaime/room` (fetched over `http(s)`). |
+| `url` | `string` | `location.origin` | Game server address, `http(s)://` or `ws(s)://`. Used for the WebSocket and for `/gaime/room` (`POST`, fetched over `http(s)`; servers from before matchmaking: `GET`). |
 | `identity` | `'browser' \| 'tab'` | `'browser'` | `browser`: one character per browser profile (ticket in `localStorage`). `tab`: every tab is a separate player (ticket in `sessionStorage`). |
 | `simulate` | `{ lag?: number; jitter?: number; loss?: number }` | from the URL | Simulated bad network for testing prediction and interpolation. Each field overrides the matching URL parameter. |
+| `match` | `{ code?: string; create?: 'private' }` | `?code=` from the URL | Matches mode: join the private match `code`, or open a new private match. Neither: public matchmaking. Shared games ignore it. |
+
+After joining, `net.room` is `{ id, code? }` and `net.invite` a link to the page with `?code=` (private matches only, else `undefined`). The client joins through `POST /gaime/room` (a seat reservation) and remembers the room per tab, so a reload goes back into the same match.
 
 URL parameters of the game page:
 
 | Parameter | Effect |
 | --- | --- |
+| `?code=<code>` | Matches mode: join this private match (the default of `match.code`; see `net.invite`). An unknown code ends in the `error` state. |
 | `?player=<name>` | Selects an additional local identity. The storage key becomes `gaime:<game>:<name>`. Characters other than letters, digits, `_` and `-` are removed, and the name is cut to 24 characters. Example: `?player=2` gives a second player on the same machine. |
 | `?lag=<ms>` | Simulated **round trip** in ms. Half is applied to each direction, and message order is preserved. |
 | `?jitter=<ms>` | Random ± spread added to each one-way delay. |
@@ -295,7 +377,7 @@ URL parameters of the game page:
 | `GAIME_PORT` | `5173` | Port of the game process (HTTP and WebSocket). Must be an integer 1–65535. The supervisor refuses to start when the port is taken. |
 | `GAIME_GATES` | `auto` | Checks run before a commit goes live. `auto` or unset: `check` in live mode, none in release mode (the build is the gate). `none`: no gates. Otherwise a comma-separated list of npm scripts (`check,test`), each run as `npm run <script> --if-present` in the game directory with a 300 s timeout. |
 | `GAIME_STATE_DIR` | `<repo>/.gaime/<game>` | Supervisor state: `host.json`, lock, `controls/`, `snapshots/`, `live/`, `releases/`, `deps/`, `live-version`, `applying`. |
-| `GAIME_DATA_DIR` | `<state>/data` | Checkpoint and admin token. It is passed to the game process. |
+| `GAIME_DATA_DIR` | `<state>/data` | Checkpoint, admin token and saved recordings (`replays/`). It is passed to the game process. |
 | `GAIME_PUBLIC_DIR` | `<state>/public` | Files published for the static gateway (release mode; cleared in live mode). |
 | `GAIME_REMOTE` | `origin` | Git remote to follow. If the remote does not exist, the local `HEAD` is used. |
 | `GAIME_BRANCH` | `main` | Branch to follow. |
@@ -304,6 +386,9 @@ URL parameters of the game page:
 | `GAIME_HMR_TIMEOUT_MS` | `30000` | The same, for a hot reload in live mode. Minimum 1000. |
 | `GAIME_SOAK_MS` | `2500` | After the version is confirmed, `/health` must still be OK after this delay. |
 | `GAIME_SERVER_ENTRY` | `src/server/index.ts` | Server entry (relative to the game directory) that the live supervisor touches after a sync, to force a backend reload. Keep it in line with the Vite plugin's `serverEntry`. |
+| `GAIME_PROCESSES` | `1` | Game processes on ports `GAIME_PORT` … `GAIME_PORT + n - 1`. More than 1 needs `GAIME_MODE=release` and `GAIME_REDIS_URL` (refused otherwise) and a game with `rooms: matches` (a shared game uses process 0 only). A deploy is confirmed when every process is healthy; a crashed process is restarted alone. [DEPLOYMENT.md](../DEPLOYMENT.md#scaling-out). |
+| `GAIME_REDIS_URL` | none | Passed to every process when `GAIME_PROCESSES > 1`. |
+| `GAIME_PUBLIC_URL` | none | Besides the Vite settings: its host (and path) + `/p<i>` becomes each process's `GAIME_PUBLIC_ADDRESS`. Without it: `127.0.0.1:<port>`. |
 
 An empty numeric setting means the default. A value that is not a number, or is below its minimum, also falls back to the default, and the supervisor logs a warning (`GAIME_POLL_MS="3s" is not a number ≥ 100 — using 3000.`).
 
@@ -312,7 +397,7 @@ The supervisor passes the following variables to the game process:
 | Context | Variables |
 | --- | --- |
 | Live | `NODE_ENV=development`, `GAIME_PORT`, `GAIME_DATA_DIR`, `GAIME_VERSION=<sha>`, `GAIME_VERSION_FILE=<state>/live-version`, `GAIME_APPLYING_FILE=<state>/applying` |
-| Release | `NODE_ENV=production`, `GAIME_PORT`, `GAIME_DATA_DIR`, `GAIME_VERSION=<sha>` |
+| Release | `NODE_ENV=production`, `GAIME_PORT`, `GAIME_DATA_DIR`, `GAIME_VERSION=<sha>`; with `GAIME_PROCESSES > 1` per process also `GAIME_PROCESS_INDEX`, `GAIME_PROCESSES`, `GAIME_PUBLIC_ADDRESS`, `GAIME_REDIS_URL` (and `GAIME_PORT + index`) |
 | Release build | `NODE_ENV=production`, `GAIME_VERSION`, `GAIME_PORT` |
 
 The rest of the environment is inherited.
@@ -321,7 +406,7 @@ The rest of the environment is inherited.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `GAIME_DATA_DIR` | `.gaime/data` (relative to the working directory) | Holds `checkpoint.json` and `admin-token`. |
+| `GAIME_DATA_DIR` | `.gaime/data` (relative to the working directory) | Holds `checkpoint.json`, `admin-token` and `replays/` (saved flight recordings). |
 | `GAIME_VERSION` | `LOCAL` | Code version reported by `/health` and in the welcome message. |
 | `GAIME_VERSION_FILE` | none | A file whose content (when present and non-empty) wins over `GAIME_VERSION`. It is re-read on every server hot reload, which is how the live supervisor confirms that a new commit is loaded. |
 | `GAIME_ADMIN_TOKEN` | generated | Bearer token for `/gaime/admin/*`. When unset, 24 random bytes (hex) are generated once and kept in `<data>/admin-token` (mode 600). |
@@ -330,6 +415,11 @@ The rest of the environment is inherited.
 | `GAIME_PUBLIC_URL` | none | See the [Vite plugin](#vite-plugin-gaime) (dev only). |
 | `GAIME_ALLOWED_HOSTS` | none | See the [Vite plugin](#vite-plugin-gaime) (dev only). |
 | `GAIME_PORT` | `5173` | Server port, for `npm run dev` and for `npm start` (a production build reads `GAIME_PORT`, then `PORT`, at start; the port at build time is the default). |
+| `GAIME_REDIS_URL` | none | Matches mode, production build: share rooms with other processes through Redis (`@colyseus/redis-presence` + `redis-driver`). Ignored with a warning by the dev server and by shared games. One Redis (or database) per game. |
+| `GAIME_PUBLIC_ADDRESS` | none | `host[:port][/path]` (no scheme) where clients reach this process's rooms — Colyseus `publicAddress`, put into seat reservations. |
+| `GAIME_PROCESS_INDEX` | `0` | Set by the supervisor. A shared game in a process other than 0 stays idle (`/gaime/room` → `503`). |
+| `GAIME_EMPTY_ROOM_SECONDS` | `30` | Matches mode: a room with no connection and no pending seat closes after this long. |
+| `GAIME_MAX_ROOMS` | `1000` | Matches mode: `/gaime/room` refuses to create rooms beyond this many (`503`). |
 
 The `gaime` CLI additionally reads the following:
 
@@ -356,6 +446,9 @@ These variables are set in `/srv/gaime/<game>/.env` (template: `deploy/docker/en
 | `GAIME_LATENCY_MS` | empty | game service | See the game server table. For testing only, never in production. |
 | `GAIME_ADMIN_TOKEN` | empty (a generated token is used) | game service | See the game server table. |
 | `GAIME_PUBLIC_URL` | `https://<DOMAIN>` | game service | See the Vite plugin table. |
+| `GAIME_EMPTY_ROOM_SECONDS`, `GAIME_MAX_ROOMS` | empty (the built-in default) | game service | See the game server table. |
+| `GAIME_PROCESSES` | `2` | `compose.redis.yml` | See the supervisor table. Add `compose.redis.yml` to `COMPOSE_FILE` and set `GAIME_MODE=release`. The gateway routes up to 16 processes. |
+| `GAIME_REDIS_URL` | `redis://redis:6379` | `compose.redis.yml` | The `redis` service of the override. |
 | `EDGE_NETWORK` | `edge` | `compose.traefik.yml` | External Docker network shared with Traefik. |
 | `TRAEFIK_ENTRYPOINT` | `websecure` | `compose.traefik.yml` | Traefik entrypoint of the router. |
 | `TRAEFIK_CERTRESOLVER` | `letsencrypt` | `compose.traefik.yml` | Traefik certificate resolver. |
@@ -379,7 +472,7 @@ Only the variables listed in `compose.yml` reach the container. It passes throug
 
 ## Join options
 
-These are the options a client passes to `joinById(roomId, options)`. `GameClient` sends `name`, `ticket` and `protocol` automatically.
+These are the options a client passes to `joinById(roomId, options)`, or in the body of `POST /gaime/room` (which reserves the seat with them). `GameClient` sends `name`, `ticket` and `protocol` automatically.
 
 | Option | Type | Meaning |
 | --- | --- | --- |
@@ -396,10 +489,11 @@ These are served by the game process (`createGameServer`). Every response has `C
 
 | Method and path | Auth | Response |
 | --- | --- | --- |
-| `GET /health` | none | `{ ok, game, version, error, disabled?, uptime }`. `ok` is false while a code error is recorded (the game is paused by an error in game code). `version` is the loaded code version. `disabled` (only present when non-empty) maps module ids switched off after an error to the error message; it is cleared by the next code load and does not make `ok` false. `uptime` is in seconds. The supervisor and the Docker health check use it. |
-| `GET /gaime/room` | none | `{ roomId }` of the single shared room. The room is created on demand. On failure it returns `503` with `Retry-After: 2`. |
-| `GET /gaime/stats` | none | Over a 10 s window: `{ clients, tickRate, tickMs, publishMs, patchBytes, eventLoopDelayMs, droppedMs, engine, parts, memoryMb, workers }` (table below). Reading is non-destructive, so several readers see the same numbers. See [SERVER.md](../SERVER.md#http). |
-| `GET\|POST /gaime/admin/:action` | `Authorization: Bearer <token>` | Operator API used by the `gaime` CLI. The POST body is JSON (max 256 kB). A wrong token gets `401`. Errors get `400 { error }`. The nginx gateway answers `404` for `/gaime/admin/` from outside. |
+| `GET /health` | none | `{ ok, game, version, error, disabled?, uptime, rooms }`. `ok` is false while a code error is recorded (the game is paused by an error in game code). `version` is the loaded code version. `disabled` (only present when non-empty) maps module ids switched off after an error to the error message; it is cleared by the next code load and does not make `ok` false. `uptime` is in seconds, `rooms` counts the rooms of this process. The supervisor and the Docker health check use it. |
+| `GET /gaime/room` | none | Shared: `{ roomId, mode: 'shared' }` of the single room, created on demand. Matches: `{ roomId, code?, mode: 'matches', size }` of an open room (created when none); `?code=` a private match (`404` when unknown), `?create=private` a new one. No seat is held. On failure `503` with `Retry-After: 2`. |
+| `POST /gaime/room` | none | Body (JSON, max 16 kB) `{ ticket, name?, protocol?, ephemeral?, room?, code?, create? }` → `{ roomId, code?, mode, size?, reservation }`: a room and a reserved seat (consume it with Colyseus `consumeSeatReservation`). `400` bad ticket, `403` full / locked / private matches off, `404` unknown code, `503` + `Retry-After` while starting or over `GAIME_MAX_ROOMS`. [ROOMS.md](../ROOMS.md#matchmaking). |
+| `GET /gaime/stats` | none | Over a 10 s window: `{ clients, rooms, tickRate, tickMs, publishMs, patchBytes, eventLoopDelayMs, droppedMs, engine, throttled, parts, memoryMb, workers }` (table below). Reading is non-destructive, so several readers see the same numbers. See [SERVER.md](../SERVER.md#http). |
+| `GET\|POST /gaime/admin/:action` | `Authorization: Bearer <token>` | Operator API used by the `gaime` CLI. `?room=<id or code>` (or `room` in the body) picks the room; default: the shared room, or the only match (`400` with several). The POST body is JSON (max 256 kB). A wrong token gets `401`. Errors get `400 { error }` (`404` for an unknown room). The nginx gateway answers `404` for `/gaime/admin/` from outside. |
 | everything from `routes(app)` | yours | Game-defined routes. |
 | `/`, `/index.html`, `/assets/*`, static files | none | Production only: `dist/client`. `index.html` is `no-store`, `/assets` is immutable for one year, other files are cached for 5 min. |
 
@@ -407,17 +501,19 @@ These are served by the game process (`createGameServer`). Every response has `C
 
 | Field | Meaning |
 | --- | --- |
-| `clients` | connected clients |
+| `clients` | connected clients (matches mode: summed over the rooms of this process) |
+| `rooms` | rooms in this process |
 | `tickRate` | the game's ticks per second |
 | `tickMs`, `publishMs`, `patchBytes` | `{ avg, max }` over 10 s: time of one room tick (all engine steps it ran), of one publish, and the largest patch of a publish |
 | `eventLoopDelayMs` | `{ p50, p99, max }`, the worst of the last complete 10 s window and the current one |
 | `droppedMs` | simulated time dropped by the catch-up limit in the last 10 s; above 0 means the server could not keep up |
 | `engine` | `{ events, timers, deferredTimers, timersPending, droppedEvents }`: events dispatched and timers fired since the last code load, ticks that hit the timer limit, live timers now, client events dropped by the per-client cap since the room started |
+| `throttled` | modules over their time budget right now: `{ [module]: factor }` (2, 4 or 8 — their systems run every n-th tick); `{}` when none. Mixed over the rooms of the process in matches mode |
 | `parts` | up to 15 entries `{ name, msPerSecond, callsPerSecond, maxMs }`, most expensive first, from the last complete 10 s window. Names: `game/step`, `<owner>/<system id>` for systems, `<owner> on <event>` for handlers, `<owner> command <type>` for commands (owner = `game` or a module id). Modifiers are counted inside the code that called `modify`. |
 | `memoryMb` | resident memory of the process |
 | `workers` | `PoolStats[]` of the worker pools |
 
-Admin actions (`admin()` in `packages/core/src/server/room.ts`):
+Admin actions (`admin()` in `packages/core/src/server/room.ts`; a room in another process is called through Redis):
 
 | Action | Body | Result |
 | --- | --- | --- |
@@ -427,8 +523,12 @@ Admin actions (`admin()` in `packages/core/src/server/room.ts`):
 | `kick` | `{ player }` (id or name) | Removes the player. Returns `{ removed: <name> }`. |
 | `pause` | none | Pauses the simulation (`reason: 'host'`). Returns `{ paused: true }`. |
 | `resume` | none | Resumes the simulation and clears the recorded error. It fails while a save could not be loaded. Returns `{ paused: false }`. |
-| `save` | none | Writes a checkpoint now. Returns `{ saved: true }`. |
+| `save` | none | Writes a checkpoint now. Returns `{ saved: true }` (`false` in matches mode: matches are not saved). |
+| `room` | none | `{ id, code?, clients, locked, private, mode }` of the room. |
+| `rooms` | none | Every room of the game (all processes): `[{ id, code?, clients, players, locked, full, private, createdAt, process }]`. Takes no room. |
 | `command` | `{ name, args?: string[] }` | Runs `GameDefinition.admin[name]`. Returns its result, or `{ ok: true }`. |
+| `replay` | `{ reason? }` | Saves the room's flight recording to `<data>/replays/<timestamp>-[<room id>-]<reason>.json` (default reason `manual`; the newest 20 files are kept). Returns `{ file }`. Fails when the game does not record (`record.enabled: false`). |
+| `replays` | none | Paths of the saved recordings, oldest first. |
 | `commands` | none | `{ [name]: description }` of `GameDefinition.admin`. |
 
 Arguments are read from the JSON body, so actions that need them must use `POST`. With `GET`, the body is empty.

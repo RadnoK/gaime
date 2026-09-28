@@ -148,6 +148,30 @@ docker compose exec game node /app/packages/host/bin/gaime.mjs players    # and 
 - **Other settings**: only variables listed in `compose.yml` reach the container; every optional one (`GAIME_REMOTE`, `GAIME_SOAK_MS`, `GAIME_START_TIMEOUT_MS`, `GAIME_HMR_TIMEOUT_MS`, `GAIME_SERVER_ENTRY`, `GAIME_ALLOWED_HOSTS`, `GAIME_LATENCY_MS`) is listed, commented out, in `deploy/docker/env.example` — empty means the default. `GAIME_PORT` (5173) and `GAIME_PUBLIC_DIR` (`/app/.gaime/<GAME>/public`) are fixed because the health check and the gateway depend on them.
 - Never `git reset` inside `repo/` and never edit `.gaime/` by hand. Do not delete `data/`.
 
+## Scaling out
+
+A game with `rooms: { mode: 'matches' }` ([ROOMS.md](ROOMS.md)) can run its matches in several processes that share them through Redis. A shared game is one room: it always runs in one process (extra processes stay idle and say so in the log).
+
+On a Docker server, in `/srv/gaime/<game>/.env`:
+
+```sh
+GAIME_MODE=release                                            # live mode runs one Vite dev server: GAIME_PROCESSES > 1 is refused
+GAIME_PROCESSES=4                                             # at most 16
+COMPOSE_FILE=compose.yml:compose.traefik.yml:compose.redis.yml   # or with compose.caddy.yml
+```
+
+then `docker compose up -d` (a new install: `install.sh … --mode release --processes 4`). `compose.redis.yml` adds a `redis` service (in memory only — the room listing needs no backup) and passes `GAIME_REDIS_URL=redis://redis:6379` and `GAIME_PROCESSES` to the game container.
+
+What happens:
+
+- The supervisor builds each release once and starts `GAIME_PROCESSES` processes of it on consecutive ports (`GAIME_PORT`, `+1`, …), each with `GAIME_PROCESS_INDEX`, the same `GAIME_REDIS_URL` and `GAIME_PUBLIC_ADDRESS=<host of GAIME_PUBLIC_URL>/p<i>` (without a public URL: `127.0.0.1:<port>`). Their output is prefixed `[p<i>]`.
+- The gateway serves the page and routes the plain paths (`/gaime/room`, Colyseus matchmaking, reconnection) to process 0 and `/p<i>/<process>/<room>` WebSockets to process i. Nothing else of the other processes is public.
+- A deploy is confirmed when **every** process reports the new version on its `/health` and still does after the soak; otherwise every process goes back to the previous release. `rollback` and `restart` handle all processes; a process that crashes is restarted alone (with backoff) — the others keep their matches.
+- `gaime status` shows each process (`p0:5173 ok <version> 3 rooms   p1:5174 …`); `gaime rooms` lists the rooms of all of them.
+- Every deploy restarts the processes, which ends their matches (matches are not saved). Players reconnect and are matchmade again.
+
+Without Docker: set `GAIME_MODE=release`, `GAIME_PROCESSES`, `GAIME_REDIS_URL` and `GAIME_PUBLIC_URL` for `gaime host`, and route `/p<i>/` to port `GAIME_PORT + i` in your proxy (see `deploy/docker/gateway.conf`). Several machines work the same way — one Redis, and a `GAIME_PUBLIC_ADDRESS` per process that reaches it.
+
 ## A VPS without Docker (systemd)
 
 Node ≥ 22.12 and git on the server, a `gaime` user, a clone in `/srv/gaime/<game>/repo`, and `.env` with `GAIME_MODE`, `GAIME_PORT` (different for every game) and `GAIME_PUBLIC_URL=https://domain`.
@@ -178,6 +202,10 @@ Put a reverse proxy with WebSockets in front of it (Caddy: `domain { reverse_pro
 | `GAIME_LATENCY_MS` | — | simulated server round trip (testing) |
 | `GAIME_START_TIMEOUT_MS`, `GAIME_HMR_TIMEOUT_MS`, `GAIME_SOAK_MS` | 120 000 / 30 000 / 2 500 | version confirmation timing (timeouts: minimum 1000) |
 | `GAIME_SERVER_ENTRY` | `src/server/index.ts` | server entry the live supervisor touches after a sync |
+| `GAIME_PROCESSES` | `1` | game processes (release mode, matches mode, with `GAIME_REDIS_URL`) — [Scaling out](#scaling-out) |
+| `GAIME_REDIS_URL` | — | Redis shared by the processes of a matches game (production builds) |
+| `GAIME_PUBLIC_ADDRESS` | set by the supervisor | where clients reach one process's rooms: `host[:port][/path]` |
+| `GAIME_EMPTY_ROOM_SECONDS`, `GAIME_MAX_ROOMS` | 30 / 1000 | matches mode: an empty room closes after this long; the most rooms at once |
 
 A numeric setting that is not a number or is below its minimum falls back to the default, with a warning in the supervisor log.
 

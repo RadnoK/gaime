@@ -50,17 +50,19 @@ Admin commands send the first candidate and move on to the next one after an HTT
 | [`host`](#host) | supervisor | game directory in a git repository, free port |
 | [`status [--json]`](#status) | supervisor | game directory |
 | [`rollback`](#control-commands-rollback-resume-pause-redeploy-restart), [`resume`](#control-commands-rollback-resume-pause-redeploy-restart), [`pause`](#control-commands-rollback-resume-pause-redeploy-restart), [`redeploy`](#control-commands-rollback-resume-pause-redeploy-restart), [`restart`](#control-commands-rollback-resume-pause-redeploy-restart) | supervisor | running supervisor for this game |
+| [`rooms`](#rooms) | admin API | running game plus token |
 | [`players`](#players) | admin API | running game plus token |
 | [`say <text>`](#say) | admin API | running game plus token |
 | [`kick <nick>`](#kick) | admin API | running game plus token |
 | [`world [key]`](#world) | admin API | running game plus token |
 | [`game pause\|resume\|save`](#game) | admin API | running game plus token |
 | [`admin [command] [args…]`](#admin) | admin API | running game plus token |
+| [`replay [reason]`, `replay --list`](#replay) | admin API | running game plus token |
 | [`smoke [url] [--hmr]`](#smoke) | tests | running game |
 | [`load [url] [options]`](#load) | tests | running game |
 | [`new <name> [--title] [--from]`, `new --list`](#new) | scaffolding | the repository |
 
-Argument parsing: `--bots`, `--seconds`, `--rate`, `--input`, `--chat`, `--title` and `--from` take a value. `--json`, `--hmr` and `--list` are switches. All other arguments that do not start with `--` are positional. If a flag appears twice, **the last occurrence wins**, so arguments after `npm run <script> --` override a preset in the script.
+Argument parsing: `--bots`, `--seconds`, `--rate`, `--input`, `--chat`, `--title`, `--from` and `--room` take a value. `--json`, `--hmr` and `--list` (`new`, `replay`) are switches. All other arguments that do not start with `--` are positional. If a flag appears twice, **the last occurrence wins**, so arguments after `npm run <script> --` override a preset in the script.
 
 ## Supervisor
 
@@ -92,14 +94,15 @@ Reads `<state>/host.json` and asks the game's `/health` on `GAIME_URL`, or else 
 
 ```text
 starter · live · supervisor PID 4242 · running
-version: 1a2b3c4d   previous: 9f8e7d6c   game /health: ok 1a2b3c4d
+version: 1a2b3c4d   previous: 9f8e7d6c   game /health: ok 1a2b3c4d · 1 room
+processes: p0:5173 ok 1a2b3c4d 3 rooms   p1:5174 ok 1a2b3c4d 2 rooms   (only with GAIME_PROCESSES > 1)
 last failed commit: 5e6f7a8b — gate "check" … (only if any)
 last error: … (only if different from the failed commit's error)
   2026-09-28 10:12:03  1a2b3c4d  hot reload 3.1s  Ola: add bog creature
   … (up to 8 history entries: time, sha, result [seconds], author: subject [— error])
 ```
 
-The first line also shows `supervisor not running` when the PID is dead, and `UPDATES PAUSED` after `pause` or `rollback`. The status field is one of `starting`, `running`, `preparing`, `applying`, `restarting`, `crashed` or `stopped`. History results are `hot reload`, `restart`, `superseded` or `failed`. `--json` prints only JSON instead: the whole state object plus `running` (boolean) and `health` (the `/health` JSON or `null`). If the supervisor has never run, it prints `No state in <stateDir>. The supervisor has not run yet.` (with `--json`: `{ "state": null, "stateDir": "…" }`) and exits 0.
+The room count comes from `/health` (rooms in that process). With several processes the `processes` line asks each one's `/health` (not when `GAIME_URL` is set). The first line also shows `supervisor not running` when the PID is dead, and `UPDATES PAUSED` after `pause` or `rollback`. The status field is one of `starting`, `running`, `preparing`, `applying`, `restarting`, `crashed` or `stopped`. History results are `hot reload`, `restart`, `superseded` or `failed`. `--json` prints only JSON instead: the whole state object plus `running` (boolean) and `health` (the `/health` JSON or `null`). If the supervisor has never run, it prints `No state in <stateDir>. The supervisor has not run yet.` (with `--json`: `{ "state": null, "stateDir": "…" }`) and exits 0.
 
 ### Control commands: rollback, resume, pause, redeploy, restart
 
@@ -128,10 +131,26 @@ Each command writes a control file into `<state>/controls/`. The running supervi
 
 These commands talk to `GET` or `POST <url>/gaime/admin/<action>` with `authorization: Bearer <token>` and a 10 s timeout (see [target resolution](#configuration-and-target-resolution)). Errors: `No admin token: set GAIME_ADMIN_TOKEN or run inside the directory of a game that is running.`, `Cannot reach <url>: …`, `Missing or wrong admin token …` (HTTP 401), or the server's message (HTTP 400). Each ends with exit 1. The admin API always talks to the room that is live right now, including after hot reloads.
 
+Every admin command takes `--room <id|code>` (a room id, or the invite code of a private match; case-insensitive). Without it the command goes to the shared room, or to the only match; with several matches running it fails with `<n> rooms are running — choose one with --room <id|code> (gaime rooms).` An unknown room: `No room "<x>" (see gaime rooms).` With several processes ([Scaling out](../DEPLOYMENT.md#scaling-out)) any room is reachable through process 0. [ROOMS.md](../ROOMS.md#operators-admin-api-and-cli).
+
+### rooms
+
+```sh
+npx gaime rooms
+```
+
+Lists every room of the game (all processes): id, invite code (`-` for a public match), human players in the world, connections (including reserved seats), creation time (UTC), and `private` / `locked` / `full`. A shared game has one room. `No rooms.` when none runs.
+
+```text
+xK3aZ1pQe  -        2 players    2 connections  since 18:02:11  (full)
+b7Qm0Lr2T  M7QTB    1 players    1 connections  since 18:04:40  (private, locked)
+```
+
 ### players
 
 ```sh
 npx gaime players
+npx gaime players --room M7QTB
 ```
 
 Prints one line per player in the world: `●` (online) or `○` (offline), `👑` for the host, then the name and the id. If the world has no players it prints `No players.`
@@ -186,6 +205,28 @@ npx gaime admin wave 5       # run GameDefinition.admin.wave with args ['5']
 
 Without a name, it lists `GameDefinition.admin` as `name  description`, or prints `The game defines no admin commands (GameDefinition.admin).` With a name, it runs that command. The remaining positional arguments are passed as strings. It prints the command's return value as JSON, or `{ "ok": true }` if the command returns nothing, and publishes the world. An unknown name fails with `Unknown admin command "<name>". Available: …`. Defining commands: [SERVER.md](../SERVER.md#operator-commands).
 
+### replay
+
+```sh
+npx gaime replay                     # save the flight recording of the room now (reason "manual")
+npx gaime replay bots stuck at wave 3   # the reason becomes part of the file name
+npx gaime replay --list              # saved recordings, oldest first
+npx gaime replay --room M7QTB        # a specific match
+```
+
+Saves the room's flight recording — the last `record.minutes` (default 10) of inputs, commands, joins, operator actions and worker results, with world snapshots — to `<data>/replays/<timestamp>-[<room id>-]<reason>.json` and prints the path plus a hint:
+
+```text
+Saved /data/replays/2026-09-28T18-02-11-512Z-manual.json
+Replay it in a test: replay(game, JSON.parse(readFileSync(file, 'utf8'))) — docs/SIMULATION.md#determinism-and-replays
+```
+
+All positional arguments are joined into the reason (non-word characters become `-`, cut to 40). The server keeps the newest 20 files. It also saves recordings by itself when the game pauses on an error (`…-error.json`) or a module is switched off (`…-module-<id>.json`), at most once a minute per room. A game with `record: { enabled: false }` fails with `This game does not record (GameDefinition.record.enabled is false).`
+
+`--list` prints the file paths (`No recordings yet.` when there are none). The list covers the whole data directory, but the request still goes through a room, so with several matches running it needs `--room` like any admin command.
+
+Copy the file to your machine (on a Docker server it is in `/srv/gaime/<game>/data/replays/`, the container's `/data`; locally in the game's `.gaime/data/replays/`) and replay it with the same code version — [SIMULATION.md](../SIMULATION.md#determinism-and-replays), [TESTING.md](../TESTING.md#what-to-test).
+
 ## Tests
 
 ### smoke
@@ -204,6 +245,13 @@ This is an end-to-end check with real Colyseus WebSocket clients. The URL is the
 4. A's socket is dropped. B sees A offline. A reconnects with its token as the same player, and B sees A online again. Prints `✓ drop + reconnect keeps the identity`.
 5. A new connection with A's ticket gets A's player id. Prints `✓ same browser identity takes over the character`.
 6. With `--hmr`, the command touches `./src/server/index.ts`, so it must run in the game directory against a local Vite dev server or live-mode game whose files are that directory. It then waits (up to 20 s) for B's fresh `welcome` and a feed item matching `New game code`, checks that the identities survived and that `/health` is still ok. Prints `✓ backend hot reload keeps the room, world and identities`.
+
+In **matches mode** (detected from `GET /gaime/room` → `mode`) clients join through `POST /gaime/room` like `GameClient`, and the steps change:
+
+- A creates a private match and B joins it by the (lower-cased) invite code; `GET /gaime/room?code=` finds the same room. Prints `✓ private match <code>: create + join by invite code`. Steps 2–4 run in that match.
+- Step 5 runs in a second private match (with 2 seats the first one is full).
+- Public matchmaking: C and D are matchmade; they share a room (or a note says other players took the free seat). With `size: 2`, E must get a different room. A private match is never picked.
+- Rooms of 1 seat: only a single-client welcome check.
 
 It prints `PASS` on success. Any failed step throws (for example, `Timeout: B receives chat (stream patch)`), and the command exits 1. Each wait times out after 10 s unless stated otherwise.
 
@@ -227,7 +275,7 @@ This is a load and latency test with real WebSocket bots against a running game.
 | `--input '<json>'` | `$GAIME_LOAD_INPUT` | Input template (below). Without a template, bots send no input. |
 | `--chat <p>` | `0` | Probability per bot per second of sending a `$chat` message (`ping <timestamp>`). |
 
-Each bot joins with a random ticket and `ephemeral: true`, and has reconnection disabled. It pings every second, sends input at `--rate` per second and chats with probability `--chat` per second. The command samples `/gaime/stats` every 2 s and prints a progress line every 5 s:
+Each bot joins with a random ticket and `ephemeral: true`, and has reconnection disabled. In matches mode every bot is matchmade through `POST /gaime/room` (bots fill rooms of `size`); the report adds `bots.rooms`, the number of rooms they ended up in. It pings every second, sends input at `--rate` per second and chats with probability `--chat` per second. The command samples `/gaime/stats` every 2 s and prints a progress line every 5 s:
 
 ```text
   15 s · online 50/50 · RTT p50 3.2 ms · p99 11.8 ms

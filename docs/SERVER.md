@@ -1,6 +1,6 @@
 # Game server
 
-The server side of a game is a **definition**: plain functions over a plain-JSON world, plus the behaviour (event handlers, modifiers, systems) that the game and its modules plug into the engine. The engine (`@gaime/core/server`) runs them inside a Colyseus room and handles connections, identities, the fixed-step clock, timers, the event bus, network sync, persistence, hot reload, chat, bots, workers and the admin API. Every option is listed in [reference/CONFIG.md](reference/CONFIG.md); this guide explains how they fit together.
+The server side of a game is a **definition**: plain functions over a plain-JSON world, plus the behaviour (event handlers, modifiers, systems) that the game and its modules plug into the engine. The engine (`@gaime/core/server`) runs them inside a Colyseus room — one shared room, or many match rooms ([ROOMS.md](ROOMS.md)) — and handles connections, identities, the fixed-step clock, timers, the event bus, network sync, persistence, hot reload, chat, bots, workers and the admin API. Every option is listed in [reference/CONFIG.md](reference/CONFIG.md); this guide explains how they fit together.
 
 **Read [SIMULATION.md](SIMULATION.md) first** — it is the model every rule and module is written against: one clock, events, modifiers, timers, systems, module commands, isolation.
 
@@ -74,6 +74,7 @@ The world extends `BaseWorld<Player>` from `@gaime/core`:
 | `players` | `Record<id, Player>` |
 | `feed` | the last 40 feed/chat items (`pushFeed`, `ctx.log`) |
 | `seq` | counter behind `ctx.nextId()` |
+| `rng` | state of the world's random generator behind `ctx.random()`: saved with the world, never sent to clients |
 
 Start from `baseWorld(SCHEMA)` and add your fields. Players extend `BasePlayer` (`id`, `name`, `online`, `data`). The world must be **plain JSON** — no `Map`, `Set`, classes, functions or `Date` — because it is saved, diffed and cloned. Per-entity extension state goes into `data` records with prefixed keys.
 
@@ -96,8 +97,10 @@ Where the work goes:
 | something once, later (a fuse, a respawn, an expiry) | a timer: `ctx.after(seconds, event, data, { key })` |
 | reactions across modules (kill → reward) | an event (`ctx.trigger`) + `on` handlers |
 | numbers several modules adjust (damage, points, price) | `ctx.modify(name, value, data)` + `modify` |
+| "who is near X" (targets, crowds, pickups in range) | `spatial` in `defineGame` + `ctx.near` / `ctx.nearest` — one index per tick for everyone |
+| derived state that is not saved (physics world, navigation grid) | `ctx.resource(key, create)` — never a module-level variable |
 
-Use `dt` and `world.time`, never wall-clock time; use `ctx.random()`, never `Math.random()` (tests pass a seeded one). Reusable pieces — collision, projectiles, cooldowns, rounds, turns — are in the kit ([KIT.md](KIT.md)).
+Use `dt` and `world.time`, never wall-clock time; use `ctx.random()`, never `Math.random()` — it draws from the world's own generator (`world.rng`), which keeps the simulation deterministic and replayable ([SIMULATION.md](SIMULATION.md#determinism-and-replays)); tests seed it with `testGame(game, { seed })`. Reusable pieces — collision, projectiles, cooldowns, rounds, turns — are in the kit ([KIT.md](KIT.md)).
 
 ### Events, modifiers and the `Sim`
 
@@ -137,7 +140,7 @@ Every hook gets `ctx` (in module code it is usually wrapped by your `Sim`):
 | `notify(playerId, text)` | private toast |
 | `emit(name, data?, playerId?)` | one-off event to everyone or one player (not saved) |
 | `nextId()` | unique, persisted number for entity ids |
-| `random()` | randomness (seedable in tests) |
+| `random()` | randomness from the world's generator (`world.rng`): deterministic, replayable, seeded in tests with `testGame(game, { seed })` |
 | `isHost(id)` | whether the player is the game host |
 | `findPlayer(nameOrId)` | case-insensitive lookup (exact, then unique prefix) |
 | `removePlayer(id)` | delete a player and close their connections |
@@ -154,14 +157,20 @@ Every hook gets `ctx` (in module code it is usually wrapped by your `Sim`):
 | `timers(prefix?)` | number of live timers (with that key prefix) |
 | `isolate(owner, run)` | run code owned by a module (a definition hook): an exception switches that module off instead of pausing the game; returns `undefined` when it failed or the module is off. Owner `'game'` pauses as usual |
 | `disabled(owner)` | whether a module is switched off after an error (until the next code load) |
+| `resource(key, create, options?)` | a derived, unsaved value (physics world, navigation grid, cache) kept for the lifetime of the loaded code and rebuilt after a hot reload; `options` = `dispose` or `{ dispose, save, load }` (`save`/`load` put its state into flight recordings) — [SIMULATION.md](SIMULATION.md#resources) |
+| `near(collection, at, radius, filter?)` | entities of a `spatial` collection within `radius` (exact distance, current positions) from the engine's shared index — [SIMULATION.md](SIMULATION.md#spatial-index) |
+| `nearest(collection, at, radius?, filter?)` | the closest one (radius defaults to the collection's `maxRadius`) |
+| `reindex(collection)` | rebuild that index now, so entities added this tick are found |
+| `room` | `{ id, code? }` of the room this world lives in (`code`: invite code of a private match) |
+| `lockRoom(locked)` | matches mode: keep newcomers out (e.g. while a round runs); players who already have a character still get back in — [ROOMS.md](ROOMS.md#locking) |
 
 ## Players and sessions
 
-- **Identity**: the browser keeps a random ticket in localStorage (per `?player=` slot); the server maps it to a player id. A reload, a server restart or a deploy brings back the same character. Tickets are never sent to other clients.
+- **Identity**: the browser keeps a random ticket in localStorage (per `?player=` slot); the server maps it to a player id. A reload, a server restart or a deploy brings back the same character (in matches mode the ticket maps to a player per room, and a process restart ends the match — [ROOMS.md](ROOMS.md#identity-and-reconnection)). Tickets are never sent to other clients.
 - **Joining**: a new identity → `createPlayer(world, id, name, ctx)` then `onPlayerOnline(world, player, true, ctx)`. A returning one → `onPlayerOnline(..., true)` only.
 - **Leaving**: when the connection drops the player goes offline at once (`onPlayerOnline(..., false)`); the connection may resume within `reconnectSeconds` (30 s) and comes back online. With `keepPlayers: false` a player who leaves for good (or does not reconnect in time) is removed (`onPlayerRemoved`), freeing the seat; with `true` the offline character stays in the world.
 - **Takeover**: the same identity in another tab takes the character; the old tab is closed with code 4103.
-- **Limits**: `maxPlayers` counts online players (bots included); a full game refuses joins with a clear message.
+- **Limits**: `maxPlayers` counts human players (online ones with `keepPlayers: true`, every seat with `false`; bots never count); a full game refuses joins with a clear message. In matches mode `rooms.size` limits each room's connections as well ([ROOMS.md](ROOMS.md#seats)).
 - **Host**: the first online human; can `/pause`, `/resume`, `/kick`, `/bot` and whatever your commands allow via `ctx.isHost(id)`.
 - **Names**: from the lobby, unique (case-insensitive), changeable with `/nick`. A new player whose name is taken becomes `Name 2`, `Name 3`…; a returning player who asks for a name someone else uses keeps their old one and gets a notice. The client follows renames, so a later rejoin sends the current name.
 
@@ -265,7 +274,7 @@ if (!world.flowRequested) {
 
 Example: `games/starter/src/workers/tactics.ts` + the `/report` chat command. Step by step: the `gaime-worker` skill.
 
-Horizontal scaling (several processes + Redis) is not needed for one shared arena per game; if a game ever needs many independent rooms, Colyseus' Redis presence/driver can be added in `createGameServer`.
+A shared game runs its one room in one process. A game with `rooms: { mode: 'matches' }` can spread its rooms over several processes with Redis (`GAIME_PROCESSES`, `GAIME_REDIS_URL`) — [ROOMS.md](ROOMS.md#scaling-out-with-redis), [DEPLOYMENT.md](DEPLOYMENT.md#scaling-out).
 
 ## Errors
 
@@ -279,8 +288,13 @@ Two levels, depending on who owns the code that threw:
 
 Tests are strict by default: `testGame` throws module errors instead of switching modules off, so a broken module fails its test ([TESTING.md](TESTING.md)).
 
+Both an error pause and a switched-off module also **save a flight recording** of the last minutes to `<data>/replays/` (see [Replays](#replays-the-flight-recorder)), so the moment it went wrong can be replayed offline.
+
+A module that is merely slow is not switched off: when its systems and handlers cost more than its time budget (`budget.moduleMs`, default 20% of the tick), its systems are throttled to every 2nd–8th tick until it recovers — a `⚡` line in the feed and `/gaime/stats` → `throttled` ([SIMULATION.md](SIMULATION.md#module-time-budgets)).
+
 ## Persistence
 
+- Shared mode only: match rooms (`rooms: { mode: 'matches' }`) keep their worlds in memory — a hot reload carries them over, a restart ends them ([ROOMS.md](ROOMS.md#lifetime)).
 - `<data>/checkpoint.json` — `{ format, game, savedAt, version, world, identities }`, written atomically (temp file + rename) about every 2 s while time moves or something changed, before a hot reload and on shutdown. `<data>` is `GAIME_DATA_DIR`, under the supervisor `.gaime/<game>/data`.
 - **Loading** a save or a hot-reload cache: `hydrate` fills fields missing in the saved world and players from `createWorld()` and a template `createPlayer()`, then `migrate(world)`, then `prepare(world, ctx)`. The template player is built by a scratch engine on a scratch world (its `ctx` effects are thrown away; `addBot` throws), so it cannot touch the real world. `network.shared` keys are not saved — rebuild them in `prepare`.
 - **New fields** need nothing: give them defaults in `createWorld` / `createPlayer`. The engine's own fields (`tick`, `schedule`) are filled the same way for saves that predate them.
@@ -299,11 +313,40 @@ Tests are strict by default: `testGame` throws module errors instead of switchin
 - Snapshots before every deploy: `.gaime/<game>/snapshots/` (last 40). Hourly backups on a VPS: `/srv/gaime/<game>/backups/`.
 - A deliberately fresh start: stop the game and move `checkpoint.json` away.
 
+## Rooms
+
+`rooms` in `defineGame` picks one of two modes ([ROOMS.md](ROOMS.md)):
+
+- **`shared`** (default) — one room, one persistent world for everybody (checkpoint above). The templates `blank`, `starter` and `duel` use it.
+- **`matches`** — `rooms: { mode: 'matches', size: 6 }`: as many rooms as needed with `size` human seats each, public matchmaking, private matches with invite codes, worlds that live in memory only and rooms that close when empty. `games/bumper` uses it.
+
+Game code is the same in both: every room has its own `Engine`, world, timers, bots and modules, and `createWorld()` makes the world of each new match. Two context members are about the room itself:
+
+```ts
+ctx.room;                    // { id, code? } — code: the invite code of a private match
+ctx.lockRoom(true);          // matches mode: no newcomers (a round is running); returning players still get in
+ctx.lockRoom(false);         // open again
+```
+
+`games/bumper` locks its room on `round.started` and unlocks it on `round.won`. In shared mode `lockRoom` only logs a warning.
+
+## Replays: the flight recorder
+
+The engine records everything that enters the simulation from outside — input changes, commands, joins and leaves, bots, operator actions, requests, worker results, throttling — for the last `record.minutes` (default 10), with world snapshots. Because the simulation is deterministic (fixed step, `ctx.random` from `world.rng`, timers in the world), `replay(game, recording)` from `@gaime/core/server` rebuilds that session tick by tick with the current code and reports the first tick where the worlds differ.
+
+- Recordings are saved to `<data>/replays/` automatically when the game pauses on an error or a module is switched off (at most once a minute per room), and on demand with `gaime replay [reason]`; `gaime replay --list` lists them. The newest 20 are kept.
+- In tests: `testGame(game, { seed, record: true })` → `t.recording()`.
+- State outside the world (a physics engine's caches) goes into recordings through `ctx.resource(key, create, { save, load })`.
+- `record: { enabled: false }` turns it off; `record: { minutes: 30 }` keeps more.
+
+How to replay, what breaks determinism and how to find the first bad tick: [SIMULATION.md](SIMULATION.md#determinism-and-replays), [TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-replay-diverges).
+
 ## Operator commands
 
 Inside the game directory (locally) or in the container (`docker compose exec game node /app/packages/host/bin/gaime.mjs …`):
 
 ```sh
+gaime rooms                    # rooms of the game (matches mode: id, invite code, players, locked)
 gaime players                  # who is here, who is the host
 gaime say "Restart at 8 pm"    # announcement in the feed
 gaime kick Ola
@@ -311,7 +354,10 @@ gaime world players            # world dump / one field (JSON)
 gaime game pause | resume | save
 gaime admin                    # list the game's commands
 gaime admin spawn wasp 5       # run one (GameDefinition.admin)
+gaime replay [reason]          # save the flight recording now; gaime replay --list
 ```
+
+Every command takes `--room <id|code>` in matches mode.
 
 ```ts
 admin: {
@@ -325,12 +371,12 @@ The token comes from `GAIME_ADMIN_TOKEN` or the generated `<data>/admin-token` (
 
 | Route | Returns |
 | --- | --- |
-| `GET /health` | `{ ok, game, version, error, disabled?, uptime }` — the version of the code actually loaded, the last code error, and modules switched off after an error (only present when there are any) |
-| `GET /gaime/room` | `{ roomId }` of the shared room |
-| `GET /gaime/stats` | `tickMs`, `publishMs`, `patchBytes` (avg/max) over a 10 s window, `eventLoopDelayMs` (p50/p99/max, the worst of the last full 10 s window and the current one), `droppedMs` (simulated time the server could not keep up with), `engine` (event, timer and dropped-event counters), `parts` (the 15 most expensive systems, handlers and commands: `msPerSecond`, `callsPerSecond`, `maxMs`), `clients`, `tickRate`, `memoryMb`, `workers`. Reading does not reset anything, so the F3 overlay and `gaime load` can read it at the same time. Field by field: [reference/CONFIG.md](reference/CONFIG.md#http-endpoints) |
+| `GET /health` | `{ ok, game, version, error, disabled?, uptime, rooms }` — the version of the code actually loaded, the last code error, modules switched off after an error (only present when there are any), and the number of rooms in this process |
+| `GET` / `POST /gaime/room` | find a room (`GET`: `{ roomId, mode, … }` of the shared room or an open match) or find one **and** reserve a seat (`POST`, what `GameClient` uses) — [ROOMS.md](ROOMS.md#matchmaking) |
+| `GET /gaime/stats` | `tickMs`, `publishMs`, `patchBytes` (avg/max) over a 10 s window, `eventLoopDelayMs` (p50/p99/max, the worst of the last full 10 s window and the current one), `droppedMs` (simulated time the server could not keep up with), `engine` (event, timer and dropped-event counters), `throttled` (modules over their time budget → factor), `parts` (the 15 most expensive systems, handlers and commands: `msPerSecond`, `callsPerSecond`, `maxMs`), `clients`, `rooms`, `tickRate`, `memoryMb`, `workers`. Reading does not reset anything, so the F3 overlay and `gaime load` can read it at the same time. Field by field: [reference/CONFIG.md](reference/CONFIG.md#http-endpoints) |
 | `POST /gaime/admin/:action` | operator API (Bearer token) |
 | `routes(app)` | your own Express routes — registered once per process, so changes need a restart |
 
 ## Testing
 
-`testGame(game, { random: seeded(1) })` runs the whole game on the same engine the server uses — clock, timers, events, systems, modules, commands, bots — without a network: `t.join('Ada')`, `t.input(id, input)`, `t.run(seconds)`, `t.command(id, c)`, `t.triggeredOf('pickup.collected')`. `testContext(world, { random, command })` gives a bare `GameContext` for unit tests of single functions. See [TESTING.md](TESTING.md).
+`testGame(game, { seed: 1 })` runs the whole game on the same engine the server uses — clock, timers, events, systems, modules, commands, bots — without a network: `t.join('Ada')`, `t.input(id, input)`, `t.run(seconds)`, `t.command(id, c)`, `t.triggeredOf('pickup.collected')`. `testContext(world, { random, command })` gives a bare `GameContext` for unit tests of single functions. See [TESTING.md](TESTING.md).

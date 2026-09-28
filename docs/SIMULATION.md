@@ -20,6 +20,9 @@ Every gaime game runs on the same engine (`packages/core/src/server/engine.ts`).
 | a number several modules may adjust (damage, speed, price, points) | **`ctx.modify('player.damage', amount, data)`** + `modify` handlers | `if (hasArmor) …` scattered in the core |
 | a new player action from a module | module **`commands`** | editing the game's `command` switch |
 | a sound or effect on clients | forward the event (`network.events`) or `ctx.emit` | putting it into the world |
+| "who is near X" (targets, separation, pickups in range) | the **spatial index**: `spatial` + `ctx.near` / `ctx.nearest` | looping over every entity for every entity |
+| derived state that is not saved (a physics world, a nav grid, a cache) | **`ctx.resource(key, create)`** | a module-level variable |
+| randomness | **`ctx.random()`** (the world's own generator) | `Math.random()` — breaks replays |
 | heavy computation | a worker + `ctx.job` ([SERVER.md](SERVER.md#heavy-processing-workers)) | a long loop in a system |
 
 ## The clock
@@ -28,6 +31,7 @@ Every gaime game runs on the same engine (`packages/core/src/server/engine.ts`).
 - The server runs a **fixed step**: each tick advances exactly `1 / tickRate` seconds (default 30 Hz). Tests (`testGame`) run the identical steps, so results match the server.
 - A slow tick is caught up (up to 3 ticks at once); beyond that the game slows down instead of spiralling. Dropped time is reported as `droppedMs` in `/gaime/stats`.
 - While paused (`world.pause`), time stops: no timers fire, no systems run.
+- `ctx.random()` draws from the world's own generator (`world.rng`, saved with the world). Together with the fixed step and timers in the world this makes the simulation **deterministic**: the same world and the same inputs give the same game — the basis for replays and for reproducible tests (`testGame(game, { seed })`).
 
 ## Events
 
@@ -119,7 +123,7 @@ systems: [
 - `step(world, inputs, dt, ctx, sim)` is where inputs are applied; it runs between the `input` and `update` phases.
 - Phases: `input` → the game's `step` → `update` (default) → `late`. Within a phase: the game's systems, then modules' systems, in declaration order.
 - `every` systems are **staggered**: two modules with `every: 1` do not run on the same tick, so periodic work spreads across ticks.
-- Keep systems cheap and bounded: iterate what you need (`SpatialHash` for neighbours), not everything × everything.
+- Keep systems cheap and bounded: iterate what you need (the [spatial index](#spatial-index) for neighbours), not everything × everything. A module whose systems cost too much is throttled ([Module time budgets](#module-time-budgets)).
 - `/gaime/stats` → `parts` lists the most expensive systems, handlers and commands (ms per second) — the first place to look when the tick gets slow.
 
 ## Module commands
@@ -154,6 +158,62 @@ if (def.tick && sim.isolate(owner, () => { def.tick!(sim, enemy); return true; }
 defaultAi(sim, enemy);    // disabled or failed module → the default behaviour
 ```
 
+## Spatial index
+
+```ts
+defineGame({ spatial: { enemies: { cell: 4 }, players: { cell: 8 } }, … });
+
+ctx.near<Enemy>('enemies', player, 6);                         // within 6 units, exact distance, current positions
+ctx.nearest<Player>('players', enemy, 10, p => p.online);      // closest match (radius optional)
+separateWith(enemies, radiusOf, e => ctx.near('enemies', e, 2 * MAX_RADIUS));   // crowds in O(n·k), from the kit
+```
+
+- Declare top-level `Record<id, { x, z }>` collections; the engine builds one grid per collection **at most once per tick, shared by every system and module** (its cost shows in `/gaime/stats` as `spatial <collection>`).
+- Queries check the live entities: an entity moved earlier in the tick is found at its new place (within `margin`, default 1 unit), a deleted one is skipped. One created in this tick shows up from the next tick — or call `ctx.reindex(collection)`.
+- `cell` ≈ your typical query radius. In `games/starter`, 800 enemies went from 10.6 to 2.2 ms per tick when AI targeting and crowd separation moved to the index.
+
+## Resources
+
+`ctx.resource(key, create, options?)` holds something derived from the world that must not be saved: a physics world ([PHYSICS.md](PHYSICS.md)), a navigation grid, a lookup table. It is created on first use, shared for the lifetime of the loaded code, and recreated from the world after a hot reload or restart — so `create` must rebuild it from world data. Never keep such things in module-level variables.
+
+The third argument is either a `dispose(value)` function (runs when the code is replaced — free WebAssembly memory, close handles) or `ResourceOptions` `{ dispose?, save?, load? }`. `save(value)` returns JSON (or structured-clonable) state that is **not** in the world — a physics engine's contact cache, warm-starting and sleep state — and the flight recorder stores it with every segment snapshot; `load(data)` rebuilds the value from it when a replay starts (without `load`, `create` is used). A resource whose state is fully derivable from the world needs neither.
+
+```ts
+const nav = ctx.resource('ola-nav', () => buildNavGrid(ctx.world), grid => grid.free());
+const phys = ctx.resource('my-physics', () => createEngine(ctx.world), {
+  dispose: e => e.free(),
+  save: e => e.snapshot(),                 // into flight recordings only — never into checkpoints
+  load: data => restoreEngine(data),       // a replay starting mid-game continues from the exact state
+});
+```
+
+## Module time budgets
+
+Every module gets a slice of the tick (`GameDefinition.budget.moduleMs`, default 20% of the tick — 6.7 ms at 30 Hz). Once a second the engine compares each module's average cost per tick (its systems and handlers):
+
+- over budget → its **systems** run only every 2nd tick (then 4th, 8th), staggered, with `dt` covering the skipped time; its event handlers and modifiers keep running, so no event is lost;
+- well under budget again → back to every tick.
+
+Both are announced in the feed (`⚡ Module "…" is over its time budget…`) and listed in `/gaime/stats` → `throttled`. One slow module then degrades itself instead of lagging the whole game. Game-owned systems are never throttled. Budgets are off in tests unless `testGame(game, { budget: true })`.
+
+## Determinism and replays
+
+The engine keeps a **flight recording** of the last minutes (`GameDefinition.record`, default on, 10 minutes): a world snapshot plus everything that entered the simulation from outside — input changes, commands, joins and leaves, bots, operator actions, request calls, worker results, throttling — stamped with ticks. `replay(game, recording)` rebuilds the session tick by tick with the current code and verifies world hashes every 5 s:
+
+```ts
+import { replay } from '@gaime/core/server';
+const result = replay(game, JSON.parse(readFileSync('replay.json', 'utf8')));
+expect(result.diverged).toBeUndefined();          // else: the first tick where the worlds differ
+```
+
+- **Where recordings come from**: saved automatically when the game pauses on an error or a module is switched off, on demand with `gaime replay`, and from tests: `testGame(game, { seed, record: true })` → `t.recording()`.
+- **What breaks determinism**: `Math.random()`, `Date.now()`, module-level state, anything not driven by `world`, `ctx`, inputs and commands. A divergence report points at the first check (5 s window) where the worlds differ — bisect with `onTick`.
+- **Segments**: the recording is kept as 3 segments of half the window each (so at least `minutes` are always covered), each starting with a world snapshot plus the engine state (system schedule, throttling, disabled modules, held inputs, and the `save` state of resources). A replay starts from the oldest segment's snapshot and checks each later snapshot on the way.
+- **Resources**: state outside the world is replayed through `ResourceOptions.save` / `load` ([Resources](#resources)). `@gaime/physics` saves Rapier's snapshot this way, so a physics game replays **exactly** even when the recording starts in the middle of a round.
+- **Limits**: replays need the same code version (a hot reload starts a new recording); code run through `engine.outside()` (and so `t.act` in tests) is not recorded — the recording is marked incomplete; custom `routes` that change the world are not recorded either (and not even marked), so change the world through commands, requests or admin commands. Worker results are replayed from the recording, not recomputed.
+
+Every template has a test that records a session with bots and replays it byte for byte — keep one in your game: it catches non-determinism the day it is introduced.
+
 ## Load: what keeps a game standing
 
 | Mechanism | Effect |
@@ -166,6 +226,9 @@ defaultAi(sim, enemy);    // disabled or failed module → the default behaviour
 | batched client events (256 per client per tick) | one message per tick instead of one per sound |
 | delta patches, shared encoding, backpressure | [PROTOCOL.md](PROTOCOL.md) |
 | per-part timing in `/gaime/stats` | you can see which module eats the tick |
+| module time budgets | a slow module throttles its own systems instead of lagging everyone |
+| shared spatial index | neighbour queries in O(k) for every module, one rebuild per tick |
+| flight recorder | a crash or a weird bug under load can be replayed exactly, offline |
 
 Measure with `npm run load -- <game> --bots 50` ([TESTING.md](TESTING.md#load-and-latency-gaime-load)).
 
@@ -174,7 +237,7 @@ Measure with `npm run load -- <game> --bots 50` ([TESTING.md](TESTING.md#load-an
 `testGame(game)` runs this exact engine without a network — join players, hold inputs, run seconds, send commands, inspect triggered events:
 
 ```ts
-const t = testGame(game, { random: seeded(1) });
+const t = testGame(game, { seed: 1 });      // or { random: seeded(1) } — but only `seed` runs can be recorded and replayed
 const ada = t.join('Ada');
 t.input(ada, { mx: 1, mz: 0 });
 t.run(3);

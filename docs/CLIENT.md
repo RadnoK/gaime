@@ -105,10 +105,11 @@ new GameClient<W extends BaseWorld, I = unknown, C extends { type: string } = { 
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `game` | required | Same as `GameDefinition.name`. The client uses it only as the prefix of its browser storage keys (`gaime:<game>…`). The room is looked up through `GET /gaime/room`. |
-| `url` | `location.origin` | Game server address, `http(s)://` or `ws(s)://`. Both the WebSocket and `GET /gaime/room` go to that server (a `ws(s)` address is fetched over `http(s)`). In dev and in production the page and the server share one port, so you rarely need it. |
+| `game` | required | Same as `GameDefinition.name`. The client uses it only as the prefix of its browser storage keys (`gaime:<game>…`). The room is found through `POST /gaime/room` (a room plus a reserved seat). |
+| `url` | `location.origin` | Game server address, `http(s)://` or `ws(s)://`. Both the WebSocket and `/gaime/room` go to that server (a `ws(s)` address is fetched over `http(s)`). In dev and in production the page and the server share one port, so you rarely need it. |
 | `identity` | `'browser'` | `'browser'`: the ticket (player identity) is kept in `localStorage`, so there is one character per browser profile, and a second tab takes that character over. `'tab'`: the ticket is kept in `sessionStorage`, so every tab is a separate player. |
 | `simulate` | from the URL | `{ lag?, jitter?, loss? }`, see [Network simulation](#network-simulation). Each field overrides the matching URL parameter. |
+| `match` | `?code=` from the URL | Games with `rooms: { mode: 'matches' }`: `{ code: 'M7QTB' }` joins that private match; `{ create: 'private' }` opens a new invite-only match (share `net.invite`); neither means public matchmaking. Shared games ignore it. See [Matches and invites](#matches-and-invites). |
 
 `?player=<name>` in the page URL (letters, digits, `_` and `-`, at most 24 characters) adds a suffix to the storage prefix (`gaime:<game>:<name>`). This gives you a separate local identity, so two players can run in one browser: `http://localhost:5173/?player=2`.
 
@@ -124,16 +125,18 @@ new GameClient<W extends BaseWorld, I = unknown, C extends { type: string } = { 
 | `stats: NetStats` | Rolling one-second network statistics (see below). |
 | `ticket: string` | The identity token sent on join. It is generated on first read and then stored. |
 | `savedName: string` | The name of the last `join` in this tab (`sessionStorage`). `GameUi` uses it to rejoin after a page reload without showing the lobby. It is cleared by `leave()`, `removed` and `replaced`. |
+| `room?: { id, code? }` | The room joined last: its id and, in a private match, the invite code. `undefined` before the first join. |
+| `invite?: string` | A link to this page with `?code=<code>` (without `?player=` and the hash) that brings a friend into the same private match; `undefined` in public matches and shared games. |
 | `lastName: string` | The last name used in this browser (`localStorage`), used to prefill the lobby. Both names follow a rename on the server (`/nick`), so a later rejoin sends the current name. |
 | `on(event, listener): () => void` | Subscribe. Returns an unsubscribe function (pass it to `scope.add`). |
 | `onEvent(name, listener): () => void` | Subscribe to one server event by name; with the fourth type parameter (`GameClient<World, Input, Command, Events>`) the payload is typed from the game's `Events`. Returns an unsubscribe function. |
 | `off()` | Remove every listener of every event. Used after a hot reload (see below). |
-| `join(name): Promise<void>` | Trims the name to 24 characters, stores it and connects. It reuses the tab's reconnection token when one exists, and otherwise joins the shared room with `{ name, ticket }`. |
+| `join(name): Promise<void>` | Trims the name to 24 characters, stores it and connects. It reuses the tab's reconnection token when one exists; otherwise it asks `POST /gaime/room` for a room and a seat — the room this tab played in if it still takes it, else the match from `match`, else public matchmaking (or the shared room) — and joins with `{ name, ticket }`. |
 | `input(input: I)` | Continuous input (movement, aim), see [Input and commands](#input-and-commands). |
 | `command(command: C \| EngineCommand \| { type: '<module>-<action>', … }): boolean` | A discrete action. Module commands (`<module>-<action>`) are accepted without being part of the game's `Command` type. Returns `false` (and sends nothing) when not connected. |
 | `chat(text): boolean` | Same as `command({ type: '$chat', text })`. Slash commands such as `/help` go through here too. |
 | `request<T>(name, payload?, timeout = 5000): Promise<T>` | RPC to `GameDefinition.requests[name]`. |
-| `leave(): Promise<void>` | Leave on purpose. The character stays in the world unless the game frees seats (`keepPlayers: false`). The state becomes `idle` and no reconnection happens. |
+| `leave(): Promise<void>` | Leave on purpose. The character stays in the world unless the game frees seats (`keepPlayers: false`). The state becomes `idle` and no reconnection happens. The tab forgets its room, so the next `join` finds a new match. |
 | `dispose()` | Drop the socket without leaving and remove all listeners. The server treats this as a network drop, so the seat is kept for `reconnectSeconds`. |
 
 ### Events
@@ -143,7 +146,7 @@ new GameClient<W extends BaseWorld, I = unknown, C extends { type: string } = { 
 | `world` | `(world: W, previous: W \| undefined) => void` | After every `welcome` and every applied patch. |
 | `status` | `(state: ConnectionState, text: string) => void` | On every state change. `text` is a readable description or the error message. |
 | `notice` | `(text: string) => void` | A private server notice (for example, a rejected command), and also Colyseus room errors that carry text. |
-| `welcome` | `(welcome: Welcome) => void` | On every full snapshot: the first join, every reconnect, every resync and every server hot reload. `Welcome` is `{ id, game, version, protocol, revision, host }`. |
+| `welcome` | `(welcome: Welcome) => void` | On every full snapshot: the first join, every reconnect, every resync and every server hot reload. `Welcome` is `{ id, game, version, protocol, revision, host, tickRate?, room? }` (`room`: `{ id, code? }`, also exposed as `net.room`). |
 | `event` | `(name: string, data: unknown) => void` | One-off server events: `ctx.emit(name, data)`, and bus events the game lists in `network.events` (their payload is the bus payload, e.g. `Events['pickup.collected']`). For sounds, screen shakes, hit markers. They arrive batched — all events of one server tick in one message, delivered to your listener one by one in order — and are not stored in the world, so a client that joins later never sees them. At most 256 per tick reach one client. |
 
 `welcome` fires many times per session, so its handler must be idempotent (assign `scene.meId = welcome.id` rather than creating objects).
@@ -166,6 +169,25 @@ scope.add(net.on('event', (name, data) => {
   if (kind === 'down') { arena.rig.shake(0.5); controls.rumble(0.8, 200); }
 }));
 ```
+
+### Matches and invites
+
+In a game with `rooms: { mode: 'matches', size }` every `join` lands in a match of up to `size` players ([ROOMS.md](ROOMS.md)). The client handles it:
+
+```ts
+const net = keep(import.meta.hot, 'net', () => new GameClient<World>({ game: 'arena' }));   // ?code= in the page URL → that private match
+const host = new GameClient<World>({ game: 'arena', match: { create: 'private' } });       // a new invite-only match
+await host.join('Ola');
+host.room;     // { id: 'xK3…', code: 'M7QTB' }
+host.invite;   // 'https://arena.example.com/?code=M7QTB' — show it, copy it to the clipboard
+```
+
+- Without `match` and without `?code=` in the URL the client uses public matchmaking: the fullest open room, or a new one.
+- A dropped connection, a page reload or a server hot reload brings the tab back into the **same** room (the room id is kept in `sessionStorage`); after `leave()`, or in a new tab, `join` finds a new match.
+- A running round may lock the room (`ctx.lockRoom`): newcomers are refused (`full`), players who already have a character there still get back in.
+- `?code=` for a code that does not exist (any more) ends in the `error` state without retrying.
+
+In a shared game `room` is `{ id }`, `invite` is `undefined` and `match` is ignored.
 
 ### Received worlds are immutable
 
@@ -216,8 +238,8 @@ net.request<Array<{ name: string; kills: number; online: boolean }>>('scoreboard
 | `connecting` | Connecting… | The first connection attempt. |
 | `connected` | Connected | Joined. `input`, `command` and `request` work. |
 | `reconnecting` | Reconnecting… | The socket dropped. Colyseus retries up to 8 times (at most 1 s apart). If it gives up (for example after a server restart), the client joins again with the same ticket after 1 s. |
-| `error` | the error message | The join failed (server unavailable, `/gaime/room` not OK). The client retries every 2 s. |
-| `full` | the server message | `maxPlayers` reached (HTTP 403). No retry. |
+| `error` | the error message | The join failed (server unavailable, `/gaime/room` not OK). The client retries every 2 s — except for an unknown or expired invite code or a bad request (HTTP 404 / 400), which stops for good. |
+| `full` | the server message | HTTP 403: `maxPlayers` reached, a full or locked private match, or private matches turned off. No retry. |
 | `replaced` | The game was opened in another tab. | The same identity joined elsewhere (close code 4103). Final. |
 | `removed` | You were removed from the game. | Kicked (close code 4102 or the `removed` message). Final. |
 

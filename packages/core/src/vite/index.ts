@@ -72,6 +72,7 @@ export function gaime(options: GaimeViteOptions = {}): PluginOption[] {
           alias: [
             { find: /^@gaime\/core$/, replacement: resolve(coreSrc, 'shared/index.ts') },
             { find: /^@gaime\/core\/(server|client|three|shared|worker|kit|ui|audio)$/, replacement: `${coreSrc}/$1/index.ts` },
+            { find: /^@gaime\/physics$/, replacement: resolve(coreSrc, '../../physics/src/index.ts') },
           ],
         },
         define: {

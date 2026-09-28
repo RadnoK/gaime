@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { seeded } from '@gaime/core';
 import { currentTurn } from '@gaime/core/kit';
-import { testGame, type TestGameOptions } from '@gaime/core/server';
+import { replay, testGame, type TestGameOptions } from '@gaime/core/server';
 import { game } from '../src/server/game';
 import { registry } from '../src/server/registry';
 import { carve, generateTerrain, heightAt, RULES } from '../src/shared/rules';
@@ -218,5 +218,18 @@ describe('duel', () => {
     expect(currentTurn(loaded.world.turns!)).toBe(other);
     expect(loaded.command(other, { type: 'fire', power: 0.5 })).toBeUndefined();
     expect(currentTurn(loaded.world.turns!)).not.toBe(active);
+  });
+});
+
+describe('determinism', () => {
+  test('a recorded bot-vs-bot round with a spectator replays exactly', () => {
+    const t = testGame(game, { seed: 21, record: true });
+    const ada = t.join('Ada');
+    t.addBot('Rival'); t.addBot('Other');
+    t.command(ada, { type: 'ready' });
+    t.run(120);
+    const result = replay(game, JSON.parse(JSON.stringify(t.recording())));
+    expect(result.diverged).toBeUndefined();
+    expect(JSON.stringify(result.world)).toBe(JSON.stringify(t.world));
   });
 });

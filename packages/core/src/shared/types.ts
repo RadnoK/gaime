@@ -47,6 +47,11 @@ export interface BaseWorld<P extends BasePlayer = BasePlayer> {
   seq: number;
   /** Engine timers (`ctx.after`, `ctx.every`). Server-only: never sent to clients. */
   schedule: Schedule;
+  /**
+   * State of the world's random generator behind `ctx.random()`: saved with the world, so the
+   * simulation is deterministic and replayable. Server-only.
+   */
+  rng: number;
 }
 
 export type PlayerOf<W extends BaseWorld> = W['players'][string];
@@ -60,6 +65,8 @@ export interface Welcome {
   host: boolean;
   /** Simulation ticks per second; the client paces its input to it (absent from older servers). */
   tickRate?: number;
+  /** The room joined: its id, and the invite code of a private match. */
+  room?: { id: string; code?: string };
 }
 
 export interface Health {
@@ -70,6 +77,8 @@ export interface Health {
   error: string | null;
   /** Modules switched off after an error (module id → message), until the next code load. */
   disabled?: Record<string, string>;
+  /** Rooms alive in this process (matches mode; 1 for a shared game). */
+  rooms?: number;
   uptime: number;
 }
 

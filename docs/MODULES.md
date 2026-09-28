@@ -52,6 +52,7 @@ export default {
 | `blank` | `pickups` | `pickup.spawned`, `pickup.collected`, `pickup.expired` / `pickup.points` |
 | `starter` (Crystal) | `enemies`, `abilities`, `waves` | see `games/starter/src/shared/types.ts` |
 | `duel` | `weapons` | see `games/duel/src/shared/types.ts` |
+| `bumper` | `powerups` | `player.knocked`, `round.won`, `dash.used`, `physics.contact`… / `dash.power`, `push.mass`, `move.accel` |
 
 Every definition has at least `id`, and by convention `name` and `description`. The rest is game-specific data plus optional hooks (functions) such as `tick`, `cast`, `start`, `onDeath`, `onImpact`, `onPickup`.
 

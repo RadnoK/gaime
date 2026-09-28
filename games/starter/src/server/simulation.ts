@@ -1,5 +1,5 @@
 import { addTimer, angleTo, baseWorld, dist, nearest } from '@gaime/core';
-import { addEffect, freeColor, pointInRing, pointOnCircle, pruneEffects, raycast, rayEnd, separate, status, weighted } from '@gaime/core/kit';
+import { addEffect, freeColor, pointInRing, pointOnCircle, pruneEffects, raycast, rayEnd, separateWith, status, weighted } from '@gaime/core/kit';
 import type { GameContext } from '@gaime/core/server';
 import type { Command, Enemy, Events, Input, Player, Sim, World } from '../shared/types';
 import { clampToArena, movePlayer, RULES } from '../shared/rules';
@@ -83,8 +83,10 @@ export function makeSim(registry: StarterRegistry, ctx: Ctx, dt: number): Sim {
     disabled: module => ctx.disabled(module),
     enemies: () => Object.values(world.enemies),
     players: () => Object.values(world.players).filter(p => p.online && p.respawnAt === 0),
-    nearestEnemy: (from, range = Infinity) => nearest(from, Object.values(world.enemies), range),
-    nearestPlayer: (from, range = Infinity) => nearest(from, sim.players(), range),
+    // The engine's shared spatial index (GameDefinition.spatial): one rebuild per tick for everyone.
+    nearestEnemy: (from, range) => ctx.nearest<Enemy>('enemies', from, range),
+    nearestPlayer: (from, range) => ctx.nearest<Player>('players', from, range, p => p.online && p.respawnAt === 0),
+    enemiesNear: (at, radius) => ctx.near<Enemy>('enemies', at, radius),
     hurtEnemy(enemy, amount, byPlayerId, source = 'shot') {
       if (world.enemies[enemy.id] !== enemy || !(amount > 0)) return;
       const by = byPlayerId && world.players[byPlayerId] ? { by: byPlayerId } : {};
@@ -190,8 +192,13 @@ export function enemyAi(sim: Sim, registry: StarterRegistry) {
 }
 
 /** System (late): enemies push each other apart. */
+/** Largest enemy radius any module may define (the neighbour search reaches this far). */
+const MAX_ENEMY_RADIUS = 2.5;
+
 export function separateEnemies(sim: Sim, registry: StarterRegistry) {
-  separate(Object.values(sim.world.enemies), enemy => registry.kinds.enemies[enemy.kind]?.radius ?? 0.5);
+  // Neighbours from the spatial index: O(n·k) instead of every pair, so big waves stay cheap.
+  const radius = (enemy: Enemy) => registry.kinds.enemies[enemy.kind]?.radius ?? 0.5;
+  separateWith(Object.values(sim.world.enemies), radius, enemy => sim.enemiesNear(enemy, radius(enemy) + MAX_ENEMY_RADIUS));
 }
 
 /** System (late): the round ends when the crystal falls; a wave is cleared when nothing is left, alive or scheduled. */

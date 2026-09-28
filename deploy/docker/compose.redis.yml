@@ -1,0 +1,29 @@
+# Scaling out: several game processes that share their rooms through Redis
+# (games with rooms: { mode: 'matches' }, release mode only; docs/DEPLOYMENT.md "Scaling out").
+# .env: COMPOSE_FILE=compose.yml:compose.traefik.yml:compose.redis.yml (or with compose.caddy.yml)
+#       GAIME_MODE=release
+#       GAIME_PROCESSES=4        (at most 16: gateway.conf routes /p0/ … /p15/)
+#
+# The supervisor starts process i on port 5173 + i with GAIME_PUBLIC_ADDRESS=<domain>/p<i>;
+# the gateway sends /p<i>/ to it. The room listing lives in Redis: nothing to back up.
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    networks: [internal]
+
+  game:
+    depends_on:
+      redis: { condition: service_healthy }
+    environment:
+      GAIME_REDIS_URL: ${GAIME_REDIS_URL:-redis://redis:6379}
+      GAIME_PROCESSES: ${GAIME_PROCESSES:-2}

@@ -67,6 +67,8 @@ test('uncollected pickups expire (a timer saved in the world)', () => {
 | `command(id, command)` | send a command (routed to a module's `commands` or the game's `command`); returns the reply |
 | `chat(id, text)` | a chat line or slash command, as the player |
 | `request(id, name, payload?)` | call `game.requests[name]` |
+| `admin(name, ...args)` | an operator command (`game.admin[name]`) |
+| `recording()` | the flight recording so far (with `record: true`) — pass it to `replay(game, recording)` |
 | `flushJobs()` | await pending `ctx.job` work and apply it |
 | `world`, `player(id)`, `ctx` | the live world, one player, the engine's `GameContext` (`t.ctx.timeLeft(key)`, `t.ctx.timers(prefix)`) |
 | `act(run)` | run code against the game's `Sim` like a system would — the events it triggers are handled right after: `t.act(sim => sim.spawnPickup('coin', t.player(ada)))` |
@@ -81,7 +83,10 @@ test('uncollected pickups expire (a timer saved in the world)', () => {
 
 | Option | Default | Use |
 | --- | --- | --- |
-| `random` | `Math.random` | always pass `seeded(n)` |
+| `seed` | random | seed of the world's generator (`world.rng`, behind `ctx.random`): the same seed plays the same game. Prefer it to `random` |
+| `random` | the world's generator | replace `ctx.random` altogether (e.g. `seeded(n)`); such a run cannot be replayed |
+| `record` | `false` | keep a flight recording for `t.recording()` (`true`, or `{ maxEntries }` to force early segment rotation). Drive the game through `input`, `command`, `join`, `addBot`, `admin`, `request` — `act` cannot be recorded and marks the recording incomplete |
+| `budget` | `false` | enforce module time budgets (they measure wall-clock time, so they are off in tests) |
 | `world` | `createWorld()` | start from this world instead — it is hydrated and migrated like a save (test old saves, or reproduce a live world) |
 | `strict` | `true` | errors in module and game code **throw** (from `t.tick`, `t.run`, `t.command`…), so a broken module fails the test instead of being switched off and a broken command fails instead of replying with an error. Set `false` to test isolation itself (`t.disabled`, `t.world.pause`, error replies) |
 
@@ -101,7 +106,7 @@ A `GameContext` on the engine without a game definition — for pure unit tests 
 
 | Option | Default | Use |
 | --- | --- | --- |
-| `random` | `Math.random` | always pass `seeded(n)` |
+| `random` | the world's generator (`world.rng`) | pass `seeded(n)`, or set `world.rng` for a fixed sequence |
 | `command` | ignored | route `ctx.command(id, command)` |
 
 `ctx.addBot` throws here — use `testGame` for bots. Anything that depends on handlers, systems or modules belongs in a `testGame` test.
@@ -129,6 +134,20 @@ A `GameContext` on the engine without a game definition — for pure unit tests 
   expect(Object.values(t.world.players).reduce((sum, p) => sum + p.wins, 0)).toBe(1);
   ```
 
+- **Determinism**: record a session with humans, bots and commands and replay it — the worlds must match byte for byte. Every template has this test; it catches `Math.random()`, `Date.now()` and module-level state the day they appear:
+
+  ```ts
+  import { replay, testGame } from '@gaime/core/server';
+  const t = testGame(game, { seed: 5, record: true });
+  const ada = t.join('Ada'); t.addBot();
+  for (let s = 0; s < 30; s++) { t.input(ada, { mx: Math.sin(s), mz: 0 }); t.run(1); }
+  const result = replay(game, JSON.parse(JSON.stringify(t.recording())));
+  expect(result.diverged).toBeUndefined();
+  expect(JSON.stringify(result.world)).toBe(JSON.stringify(t.world));
+  ```
+
+  `replay(game, recording, { until?, onTick? })` returns `{ world, engine, ticks, verified, diverged? }`: `verified` counts the checks that matched (a world hash every 150 ticks plus every segment snapshot), `diverged` is the first one that did not ([CONFIG.md](reference/CONFIG.md#testgame-and-replay)). Physics games replay exactly even from a snapshot in the middle of a round — `games/bumper/tests` checks it with short segments (`{ ...game, record: { minutes: 0.05 } }`).
+- **A live bug**: download the recording the server saved (`gaime replay`, or automatically after an error — see [SIMULATION.md](SIMULATION.md#determinism-and-replays)), replay it in a test with `onTick` to stop where it goes wrong, and keep it as a regression test. When it diverges instead: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-replay-diverges).
 - **Jobs**: call the code that uses `ctx.job`, `await t.flushJobs()`, then assert the applied result. The job function itself runs inline in tests (workers only exist in a server process); test worker functions directly by importing them.
 - **Kit usage**: pure functions — call them with plain objects.
 

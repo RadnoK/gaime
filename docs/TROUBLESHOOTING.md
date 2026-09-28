@@ -10,10 +10,11 @@ Symptoms, causes and fixes, grouped by where you notice them. Deploy-specific ch
 | The browser console | client errors, HMR messages (`[vite] hot updated …`) |
 | F3 in the game | connection, ping, patch rate and size |
 | `http://localhost:5173/health` | loaded version, last code error, `disabled` modules |
-| `http://localhost:5173/gaime/stats` | tick cost, `parts` (which system / handler / command eats the tick), `droppedMs`, engine counters |
-| The game feed | engine messages (⚠ pauses, ⚠ switched-off modules, deploys, joins) |
+| `http://localhost:5173/gaime/stats` | tick cost, `parts` (which system / handler / command eats the tick), `throttled` (modules over their time budget), `droppedMs`, engine counters |
+| The game feed | engine messages (⚠ pauses, ⚠ switched-off modules, ⚡ throttled modules, deploys, joins) |
 | `npx gaime status` (supervisor) | deploy history, failed commits, paused updates |
 | `npx gaime world <key>` | the live world, e.g. `npx gaime world players` |
+| `npx gaime replay --list` | flight recordings saved after errors (and by `gaime replay`) — replay the last minutes offline ([below](#replaying-a-live-bug)) |
 
 ## The game is paused with ⚠
 
@@ -40,7 +41,24 @@ A handler, modifier or system of that module (or a hook the game ran through `ct
 - The stack trace is in the server log (`[gaime] module <id>`).
 - Reproduce it: `testGame` is strict by default, so the same situation throws in a test with a full stack.
 - Push a fix: the next code load switches the module back on (the list in `/health` empties). There is no manual "switch on" — a module that fails again is switched off again.
+- The server also saved a flight recording of the minutes before (`[gaime] replay saved: …` in the log, `npx gaime replay --list`): replay it to watch the module fail ([Replaying a live bug](#replaying-a-live-bug)).
 - Typical causes: a handler assuming an entity still exists (events carry ids; the entity may be gone by the time the handler runs — check), a field missing on old entities, a modifier returning `NaN`.
+
+## A module is over its time budget
+
+The feed shows `⚡ Module "<id>" is over its time budget: its systems now run every <n> ticks.`, and `/gaime/stats` lists it:
+
+```sh
+curl -s localhost:5173/gaime/stats | jq '{throttled, parts}'      # { "throttled": { "ola-swarm": 4 }, "parts": [...] }
+```
+
+The module's systems and handlers together cost more than its budget (`budget.moduleMs`, default 20% of the tick — 6.7 ms at 30 Hz), averaged over a second. The engine now runs its **systems** only every 2nd, 4th or at most 8th tick (with a correspondingly larger `dt`); its event handlers and modifiers still run every time, so nothing is lost — but whatever the systems do (movement, AI, spawning) looks choppier. When the cost drops well below the budget, the factor halves again and the feed says `Module "<id>" is back within its time budget.`
+
+- `parts` names the expensive system or handler (`<id>/<system>`, `<id> on <event>`) with `msPerSecond` and `maxMs`.
+- Typical causes: every entity × every entity (use the [spatial index](SIMULATION.md#spatial-index): `spatial` + `ctx.near`, and `separateWith` for crowds), AI thinking every tick (a system with `every: 0.2`), heavy work in a handler that fires often, a big search (move it to a worker).
+- The game's own code is never throttled; a slow game `step` shows up as `droppedMs` instead ([Performance](#performance)).
+- Budgets measure wall-clock time, so they are off in tests; `testGame(game, { budget: true })` turns them on.
+- A game that knowingly runs one expensive module can raise the budget (`budget: { moduleMs: 12 }`) or turn it off (`budget: { enabled: false }`).
 
 ## Event storm
 
@@ -75,6 +93,61 @@ A handler, modifier or system of that module (or a hook the game ran through `ct
 - Locally: the terminal shows the file and message; the old code keeps running until you fix it.
 - On the server: the supervisor reverts to the previous version and marks the commit as failed; push a fix.
 
+## Replaying a live bug
+
+The server keeps a flight recording of the last minutes (`GameDefinition.record`, default 10). It is saved to `<data>/replays/` by itself when the game pauses on an error or a module is switched off (at most once a minute), and on demand:
+
+```sh
+cd games/<game>
+npx gaime replay "bots stuck at wave 3"     # → Saved …/replays/<time>-bots-stuck-at-wave-3.json
+npx gaime replay --list
+```
+
+Copy the file into the repository (outside `.gaime/`, e.g. `games/<game>/tests/fixtures/`; do not commit real player data) and replay it with the **same code version** (`recording.version`; `git checkout <version>` in a scratch worktree if the code has moved on):
+
+```ts
+import { readFileSync } from 'node:fs';
+import { replay } from '@gaime/core/server';
+const recording = JSON.parse(readFileSync('tests/fixtures/replay.json', 'utf8'));
+const result = replay(game, recording, {
+  onTick: (world, tick) => { if (tick === 18_450) debugger; },   // stop just before it goes wrong
+});
+expect(result.diverged).toBeUndefined();
+```
+
+The replay starts from the oldest snapshot in the recording and runs the exact same ticks, so the error that paused the game (or switched the module off) happens again at the same tick — its stack trace is logged (`[gaime] simulation` / `[gaime] module <id>`), the world pauses (`result.world.pause`) or the module shows up in `result.engine.disabledModules`, and you can set breakpoints and add logging around it.
+
+### A replay diverges
+
+`result.diverged = { tick, expected, actual }` is the first check where the replayed world differs from the recorded one (checks every 150 ticks — 5 s at 30 Hz — plus every segment snapshot). Something in the simulation is not deterministic, or the code differs:
+
+| Cause | Fix |
+| --- | --- |
+| `Math.random()` in simulation code (a module, a helper, a kit call given `Math.random`) | `ctx.random()` / `sim.random()` — the world's generator |
+| `Date.now()`, `performance.now()`, `new Date()` deciding game logic | `world.time` / `world.tick` |
+| module-level variables, caches, counters, closures holding state | state in the world (`entity.data`), derived state in `ctx.resource` (rebuilt from the world) |
+| iteration over something unordered that is not the world (a `Set` of ids built from async results, object keys that are numbers vs strings added in different order) | sort, or iterate the world's own records |
+| a `ctx.resource` with state that is not in the world and not saved | give it `save`/`load` ([SIMULATION.md](SIMULATION.md#resources)), or make it derivable from the world |
+| different code: the recording was made by another commit, or local edits | replay with the recorded version |
+| the test replays a run made with `testGame(game, { random: seeded(n) })` | record with `{ seed: n }` instead — `random` bypasses `world.rng` |
+
+Bisect with `onTick`: hash or dump the part of the world you suspect every tick, in the live run (a test that records) and in the replay, and compare — or replay twice with `until` set before and after the reported tick and diff `JSON.stringify(result.world)` of both runs. The divergence happened somewhere in the 150 ticks before `diverged.tick`.
+
+`diverged.actual === 'the game stayed paused'`: the replay paused on an error that did not happen live (or earlier) — usually the same non-determinism, or a code difference; the error is in `result.world.pause.message`.
+
+### A recording is incomplete
+
+`recording.reason` ends with `(incomplete: …)`:
+
+- `code ran outside the tick (outside())` — something changed the world outside the recorded entry points: `t.act(…)` in a test, or custom code calling `engine.outside`. Such changes cannot be replayed. In tests, drive the game through `t.input`, `t.command`, `t.admin`, `t.request`, `t.join`, `t.addBot` when you want a replayable recording; on a server, change the world through commands, requests or admin commands, never from `routes` (Express handlers bypass the recorder entirely, without even marking it).
+- `a "<type>" entry is not serialisable` — a command, request payload or job result held something `structuredClone` cannot copy (a function, a class with private fields). Keep payloads and job results plain data.
+
+Everything recorded before that point still replays; after it the replay drifts.
+
+### Physics replays
+
+Games using `@gaime/physics` replay exactly, even from a snapshot in the middle of a round: the physics resource saves Rapier's full snapshot (contacts, warm starting, sleeping bodies) with every segment through `ResourceOptions.save`/`load`. If a physics game diverges, look for the usual causes above first; then check that the physics system runs through `physics.system()` / `physics.step(ctx, dt)` with the engine's `dt` (a custom step size or a second step per tick breaks it), and that game code does not keep its own Rapier objects outside the resource ([PHYSICS.md](PHYSICS.md#recordings-and-replays)).
+
 ## Hot reload problems
 
 | Symptom | Cause | Fix |
@@ -107,7 +180,8 @@ A handler, modifier or system of that module (or a hook the game ran through `ct
 
 | Symptom | Where to look | Fix |
 | --- | --- | --- |
-| Lag for everyone as the game grows | `npm run load`: `server.tickMsMax` above the budget; `/gaime/stats` → `parts` names the system, handler or command that costs the most (`msPerSecond`, `maxMs`) | make that part cheaper: spatial queries (`SpatialHash`), `every` for AI and spawners, fewer entities, heavy work to a worker (`ctx.job`) |
+| Lag for everyone as the game grows | `npm run load`: `server.tickMsMax` above the budget; `/gaime/stats` → `parts` names the system, handler or command that costs the most (`msPerSecond`, `maxMs`) | make that part cheaper: the engine's spatial index (`spatial` + `ctx.near`), `every` for AI and spawners, fewer entities, heavy work to a worker (`ctx.job`) |
+| One feature gets choppy, `⚡ … over its time budget` in the feed | `/gaime/stats` → `throttled` | [A module is over its time budget](#a-module-is-over-its-time-budget) |
 | The game runs slow-motion for a moment | `/gaime/stats` → `droppedMs` > 0: ticks took so long that the clock dropped time (catch-up limit 3 ticks) | same as above; find the spike with `parts` → `maxMs` |
 | Sounds/effects missing under load | `/gaime/stats` → `engine.droppedEvents` grows: more than 256 client events per client per tick | forward fewer events (`network.events`), emit one summarising event instead of one per entity |
 | High bandwidth / big patches | F3 or load report `patchBytesMax` | list big dictionaries in `network.entities`, prune effect arrays, `hidden` for server-only fields, lower `precision`, raise `publishEvery` |
@@ -151,5 +225,6 @@ Details: [PROTOCOL.md](PROTOCOL.md) and the `gaime-networking` skill.
 ## Still stuck
 
 - Reproduce in a logic test with `testGame` ([TESTING.md](TESTING.md)) — the same engine as the server, strict about errors, the fastest loop. `testGame(game, { world: savedWorld })` starts from a copy of the live world (`npx gaime world > /tmp/world.json`).
+- Or replay the last minutes exactly: `npx gaime replay` and [Replaying a live bug](#replaying-a-live-bug).
 - `npx gaime smoke` tells you whether the problem is the room/network or your game.
 - Framework bugs: see the `gaime-engine` skill and add a failing test in `packages/core/tests`.

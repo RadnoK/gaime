@@ -146,6 +146,8 @@ export interface Sim {
   players(): Player[];
   nearestEnemy(from: { x: number; z: number }, range?: number): Enemy | undefined;
   nearestPlayer(from: { x: number; z: number }, range?: number): Player | undefined;
+  /** Enemies within `radius` (the engine's spatial index; exact distance). */
+  enemiesNear(at: { x: number; z: number }, radius: number): Enemy[];
   /** Damage through `enemy.damage`; a kill scores (`enemy.reward`), calls `onDeath` and triggers `enemy.died`. */
   hurtEnemy(enemy: Enemy, amount: number, byPlayerId?: string, source?: string): void;
   /** Damage through `player.damage`; at 0 HP the player is down (`player.downed`) and respawns by a timer. */

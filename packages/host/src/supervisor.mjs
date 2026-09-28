@@ -7,10 +7,13 @@
 // release mode — every commit becomes an isolated production build; the old build keeps
 //                serving until the new one is compiled, then a short restart. A static
 //                gateway (nginx) keeps the page and assets online during the swap.
+//                GAIME_PROCESSES=n runs n game processes on consecutive ports that share
+//                their rooms through Redis (GAIME_REDIS_URL; games with rooms: matches).
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { basename, join, relative } from 'node:path';
 import { changedFiles, extract, git, newest, relevant } from './git.mjs';
 import { clearPublic, markDeploying, preparePublic, publish } from './public-release.mjs';
@@ -34,8 +37,15 @@ export function resolveConfig(cwd = process.cwd(), env = process.env) {
   const gates = gatesSetting.split(',').map(s => s.trim()).filter(Boolean);
   const port = Number(env.GAIME_PORT || 5173);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('GAIME_PORT must be a port number.');
+  const processes = Math.floor(envNumber(env, 'GAIME_PROCESSES', 1, 1));
+  const redisUrl = env.GAIME_REDIS_URL || '';
+  if (processes > 1 && mode === 'live') throw new Error(`GAIME_PROCESSES=${processes} needs GAIME_MODE=release: live mode runs one Vite dev server (hot reload keeps the rooms in its memory). Use GAIME_PROCESSES=1 with live mode.`);
+  if (processes > 1 && !redisUrl) throw new Error(`GAIME_PROCESSES=${processes} needs GAIME_REDIS_URL: the processes find each other's rooms through Redis.`);
+  if (port + processes - 1 > 65535) throw new Error(`GAIME_PORT + GAIME_PROCESSES goes past port 65535.`);
+  if (env.GAIME_PUBLIC_URL) { try { new URL(env.GAIME_PUBLIC_URL); } catch { throw new Error(`GAIME_PUBLIC_URL is not a URL: ${env.GAIME_PUBLIC_URL}`); } }
   return {
-    repoRoot, gamePath, game, mode, port, gates, stateDir,
+    repoRoot, gamePath, game, mode, port, gates, stateDir, processes, redisUrl,
+    publicUrl: env.GAIME_PUBLIC_URL || '',
     dataDir: env.GAIME_DATA_DIR || join(stateDir, 'data'),
     publicDir: env.GAIME_PUBLIC_DIR || join(stateDir, 'public'),
     remote: env.GAIME_REMOTE || 'origin',
@@ -56,6 +66,23 @@ export function envNumber(env, name, fallback, min = 0) {
   if (Number.isFinite(value) && value >= min) return value;
   log(`${name}=${JSON.stringify(raw)} is not a number ≥ ${min} — using ${fallback}.`);
   return fallback;
+}
+
+/**
+ * Where clients reach process `index` (Colyseus publicAddress, without scheme): `<public host>/p<index>`,
+ * which the gateway routes to port GAIME_PORT + index. Without GAIME_PUBLIC_URL: the port itself.
+ */
+export function publicAddress(config, index) {
+  if (!config.publicUrl) return `127.0.0.1:${config.port + index}`;
+  const url = new URL(config.publicUrl);
+  return `${url.host}${url.pathname.replace(/\/+$/, '')}/p${index}`;
+}
+
+/** Environment of game process `index`: its port, and with several processes Redis and its public address. */
+export function processEnv(config, index) {
+  const env = { GAIME_PORT: String(config.port + index) };
+  if ((config.processes ?? 1) > 1) Object.assign(env, { GAIME_PROCESS_INDEX: String(index), GAIME_PROCESSES: String(config.processes), GAIME_PUBLIC_ADDRESS: publicAddress(config, index), GAIME_REDIS_URL: config.redisUrl });
+  return env;
 }
 
 export const paths = config => ({
@@ -86,7 +113,8 @@ export class Supervisor {
     this.c = config;
     this.p = paths(config);
     this.state = readJson(this.p.state, {});
-    this.child = null;
+    /** Running game processes (`gaimeIndex`, `gaimePort` on each); one in live mode. */
+    this.children = [];
     this.stopping = false;
     this.crashes = [];
     this.restartAt = 0;
@@ -103,16 +131,23 @@ export class Supervisor {
     this.save({ history });
   }
 
+  get processes() { return this.c.processes ?? 1; }
+  /** Ports of every game process. */
+  get ports() { return Array.from({ length: this.processes }, (_, i) => this.c.port + i); }
+
   async start() {
     for (const dir of [this.c.stateDir, this.c.dataDir, this.p.controls, this.p.snapshots]) mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.lock();
     const stop = () => { if (!this.stopping) log('Stopping…'); this.stopping = true; };
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
     rmSync(this.p.work, { recursive: true, force: true });
-    this.save({ pid: process.pid, game: this.c.game, mode: this.c.mode, port: this.c.port, gamePath: this.c.gamePath, status: 'starting', error: null });
-    log(`${this.c.game} · ${this.c.mode} mode · port ${this.c.port} · following ${this.c.remote}/${this.c.branch} every ${this.c.pollMs / 1000} s`);
+    this.save({ pid: process.pid, game: this.c.game, mode: this.c.mode, port: this.c.port, processes: this.processes, gamePath: this.c.gamePath, status: 'starting', error: null });
+    const ports = this.processes > 1 ? `ports ${this.c.port}–${this.c.port + this.processes - 1} (${this.processes} processes, Redis)` : `port ${this.c.port}`;
+    log(`${this.c.game} · ${this.c.mode} mode · ${ports} · following ${this.c.remote}/${this.c.branch} every ${this.c.pollMs / 1000} s`);
     try {
-      await ensureFreePort(this.c.port);
+      for (const port of this.ports) await ensureFreePort(port);
+      // Several processes share the data directory: create the admin token once, before any of them reads it.
+      if (this.processes > 1) ensureAdminToken(this.c.dataDir);
       let target = this.state.current?.sha;
       if (!this.state.paused || !target) {
         try { target = (await newest(this.c.repoRoot, this.c.remote, this.c.branch)).sha; }
@@ -125,8 +160,8 @@ export class Supervisor {
       this.save({ status: 'stopped', error: error.message });
       throw error;
     } finally {
-      await this.stopChild();
-      this.save({ status: 'stopped', pid: null, childPid: null });
+      await this.stopChildren();
+      this.save({ status: 'stopped', pid: null, childPid: null, childPids: [] });
       rmSync(this.p.lock, { recursive: true, force: true });
       process.off('SIGINT', stop); process.off('SIGTERM', stop);
     }
@@ -147,8 +182,8 @@ export class Supervisor {
     let nextPoll = Date.now() + this.c.pollMs;
     while (!this.stopping) {
       await this.controls();
-      if (this.child && (this.child.exitCode !== null || this.child.signalCode !== null)) this.crashed();
-      if (!this.child && this.state.current && Date.now() >= this.restartAt && !this.stopping) await this.revive();
+      for (const child of [...this.children]) if (exited(child)) this.crashed(child);
+      if (this.missing().length && this.state.current && Date.now() >= this.restartAt && !this.stopping) await this.revive();
       if (!this.state.paused && Date.now() >= nextPoll) {
         try {
           const { sha } = await newest(this.c.repoRoot, this.c.remote, this.c.branch);
@@ -172,7 +207,7 @@ export class Supervisor {
         if (command === 'pause') { this.save({ paused: true }); log('Automatic updates paused.'); }
         if (command === 'resume') { this.save({ paused: false, error: null }); log('Automatic updates resumed.'); }
         if (command === 'redeploy') { this.save({ attempted: null, failed: null, paused: false }); log('Retrying the newest commit.'); }
-        if (command === 'restart') { log('Restarting the game process…'); await this.stopChild(); this.restartAt = 0; }
+        if (command === 'restart') { log(`Restarting the game process${this.processes > 1 ? 'es' : ''}…`); await this.stopChildren(); this.restartAt = 0; }
         if (command === 'rollback') {
           this.save({ paused: true });
           await this.mode.rollback();
@@ -207,7 +242,7 @@ export class Supervisor {
       log(`❌ ${short(sha)} failed: ${error.message}`);
       log(`The game keeps running ${short(this.state.current?.sha)}. The next commit will try again.`);
       this.record({ sha, subject, result: 'failed', error: error.message });
-      this.save({ status: this.child ? 'running' : 'stopped', failed: { sha, error: error.message }, error: error.message });
+      this.save({ status: this.children.length ? 'running' : 'stopped', failed: { sha, error: error.message }, error: error.message });
     } finally {
       rmSync(this.p.work, { recursive: true, force: true });
     }
@@ -253,87 +288,118 @@ export class Supervisor {
     else rmSync(this.p.checkpoint, { force: true });
   }
 
-  // ── child process ─────────────────────────────────────────────────
+  // ── child processes ───────────────────────────────────────────────
 
-  spawnChild(cwd, args, env) {
-    log(`Start: npm ${args.join(' ')} (${relative(this.c.stateDir, cwd) || cwd})`);
+  /** Indexes of game processes that should run but do not. */
+  missing() {
+    const running = new Set(this.children.map(child => child.gaimeIndex));
+    return Array.from({ length: this.processes }, (_, i) => i).filter(i => !running.has(i));
+  }
+
+  spawnChild(cwd, args, env, index = 0) {
+    const label = this.processes > 1 ? ` [p${index}, port ${this.c.port + index}]` : '';
+    log(`Start: npm ${args.join(' ')} (${relative(this.c.stateDir, cwd) || cwd})${label}`);
     const child = spawn('npm', args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.gaimeIndex = index;
+    child.gaimePort = this.c.port + index;
     child.on('error', error => log(`Game process: ${error.message}`));
-    // Pass the output through, and notice a failed server hot reload right away
-    // instead of waiting for the health timeout.
+    // Pass the output through (prefixed per process when there are several), and notice a
+    // failed server hot reload right away instead of waiting for the health timeout.
+    const prefix = this.processes > 1 ? `[p${index}] ` : '';
     for (const [stream, out] of [[child.stdout, process.stdout], [child.stderr, process.stderr]]) {
       let tail = '';
+      let partial = '';
       stream.on('data', chunk => {
-        out.write(chunk);
+        if (!prefix) out.write(chunk);
+        else {
+          const lines = (partial + chunk).split('\n');
+          partial = lines.pop();
+          for (const line of lines) out.write(`${prefix}${line}\n`);
+        }
         tail = (tail + chunk).slice(-4000);
         const match = /\[colyseus\] Failed to (?:re)?load server module:?\s*([^\n]*)/.exec(tail);
         if (match) { this.loadError = { at: Date.now(), text: match[1].trim() || 'server code failed to load' }; tail = ''; }
       });
     }
-    this.child = child;
-    this.save({ childPid: child.pid });
+    this.children = [...this.children.filter(other => other.gaimeIndex !== index), child].sort((a, b) => a.gaimeIndex - b.gaimeIndex);
+    this.saveChildren();
     return child;
   }
 
-  async stopChild() {
-    const child = this.child;
-    this.child = null;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    const group = () => { try { process.kill(-child.pid, 0); return true; } catch { return false; } };
-    try { process.kill(-child.pid, 'SIGTERM'); } catch {}
-    const deadline = Date.now() + 20_000;
-    while (group() && Date.now() < deadline) await delay(100);
-    if (group()) { log('The game did not stop within 20 s — SIGKILL (the last checkpoint is at most ~2 s old).'); try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
-    this.save({ childPid: null });
+  saveChildren() {
+    const pids = this.children.map(child => child.pid);
+    this.save({ childPid: pids[0] ?? null, childPids: pids });
   }
 
-  /** Healthy = `/health` reports this exact version with no error, and still does after a short soak. */
-  async waitHealthy(sha, timeout, soak = this.c.soakMs, since = Date.now()) {
+  /** Stop game processes (default: all) and wait until each process group is gone. */
+  async stopChildren(indexes) {
+    const stopping = this.children.filter(child => !indexes || indexes.includes(child.gaimeIndex));
+    this.children = this.children.filter(child => !stopping.includes(child));
+    await Promise.all(stopping.map(async child => {
+      if (exited(child)) return;
+      const group = () => { try { process.kill(-child.pid, 0); return true; } catch { return false; } };
+      try { process.kill(-child.pid, 'SIGTERM'); } catch {}
+      const deadline = Date.now() + 20_000;
+      while (group() && Date.now() < deadline) await delay(100);
+      if (group()) { log('The game did not stop within 20 s — SIGKILL (the last checkpoint is at most ~2 s old).'); try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+    }));
+    this.saveChildren();
+  }
+
+  /** Healthy = `/health` of every given process reports this exact version with no error, and still does after a short soak. */
+  async waitHealthy(sha, timeout, soak = this.c.soakMs, since = Date.now(), children = this.children) {
     const deadline = Date.now() + timeout;
+    const name = child => (this.processes > 1 ? `process ${child.gaimeIndex}: ` : '');
+    const check = async () => Promise.all(children.map(async child => ({ child, health: await this.health(child.gaimePort) })));
     let last = 'no response';
     while (Date.now() < deadline && !this.stopping) {
-      if (!this.child || this.child.exitCode !== null || this.child.signalCode !== null) throw new Error('the game process exited before it became healthy');
+      if (!children.length || children.some(exited)) throw new Error('the game process exited before it became healthy');
       if (this.loadError && this.loadError.at >= since) throw new Error(`server code failed to load: ${this.loadError.text}`);
-      const health = await this.health();
-      if (health?.version === sha && health.error) throw new Error(`code error: ${health.error}`);
-      if (health?.ok && health.version === sha) {
+      const results = await check();
+      const broken = results.find(({ health }) => health?.version === sha && health.error);
+      if (broken) throw new Error(`${name(broken.child)}code error: ${broken.health.error}`);
+      if (results.every(({ health }) => health?.ok && health.version === sha)) {
         if (soak) {
           await delay(soak);
-          const again = await this.health();
-          if (!again?.ok || again.version !== sha) throw new Error(`error after start: ${again?.error ?? 'no response'}`);
+          const bad = (await check()).find(({ health }) => !health?.ok || health.version !== sha);
+          if (bad) throw new Error(`${name(bad.child)}error after start: ${bad.health?.error ?? 'no response'}`);
         }
         return;
       }
-      if (health) last = `version ${short(health.version)}${health.error ? `, error: ${health.error}` : ''}`;
+      const waiting = results.find(({ health }) => !health?.ok || health.version !== sha);
+      if (waiting?.health) last = `${name(waiting.child)}version ${short(waiting.health.version)}${waiting.health.error ? `, error: ${waiting.health.error}` : ''}`;
       await delay(250);
     }
     throw new Error(this.stopping ? 'stopped' : `not confirmed within ${Math.round(timeout / 1000)} s (${last})`);
   }
 
-  async health() {
+  async health(port = this.c.port) {
     try {
-      const response = await fetch(`http://127.0.0.1:${this.c.port}/health`, { signal: AbortSignal.timeout(1500), cache: 'no-store' });
+      const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500), cache: 'no-store' });
       return await response.json();
     } catch { return null; }
   }
 
-  crashed() {
-    const child = this.child;
-    this.child = null;
+  /** A game process exited on its own: restart it (only it — the others keep their rooms) with backoff. */
+  crashed(child) {
+    this.children = this.children.filter(other => other !== child);
+    this.saveChildren();
     const now = Date.now();
     this.crashes = [...this.crashes.filter(at => now - at < 120_000), now];
     const wait = Math.min(30_000, 1000 * 2 ** (this.crashes.length - 1));
     this.restartAt = now + wait;
-    log(`The game process exited (${child.exitCode ?? child.signalCode}). Restarting in ${wait / 1000} s.`);
-    this.save({ status: 'crashed', childPid: null, error: `game process exited (${child.exitCode ?? child.signalCode})` });
+    const which = this.processes > 1 ? `Game process ${child.gaimeIndex}` : 'The game process';
+    log(`${which} exited (${child.exitCode ?? child.signalCode}). Restarting in ${wait / 1000} s.`);
+    this.save({ status: 'crashed', error: `game process${this.processes > 1 ? ` ${child.gaimeIndex}` : ''} exited (${child.exitCode ?? child.signalCode})` });
   }
 
   async revive() {
+    const indexes = this.missing();
     try {
-      await this.mode.startCurrent();
+      await this.mode.startCurrent(indexes);
       this.save({ status: 'running', error: null });
     } catch (error) {
-      await this.stopChild();
+      await this.stopChildren(indexes);
       const wait = Math.min(30_000, 2000 * 2 ** this.crashes.length);
       this.crashes.push(Date.now());
       this.restartAt = Date.now() + wait;
@@ -398,7 +464,7 @@ class LiveMode {
 
   async startChild(sha) {
     const { s } = this;
-    s.spawnChild(join(s.p.live, s.c.gamePath), ['run', 'dev'], this.env(sha));
+    s.spawnChild(join(s.p.live, s.c.gamePath), ['run', 'dev'], this.env(sha), 0);
     await s.waitHealthy(sha, s.c.startTimeout, 0);
   }
 
@@ -418,7 +484,7 @@ class LiveMode {
     const config = files === null || files.some(file => this.restartFile(file));
     if (files?.some(file => file.startsWith('packages/host/'))) log('Note: the supervisor code (packages/host) changed — it takes effect after restarting "gaime host".');
 
-    if (!s.child || key !== s.state.live?.depsKey || config) {
+    if (!s.children.length || key !== s.state.live?.depsKey || config) {
       // Dependencies changed: install next to the running game, then a short restart.
       if (key !== s.state.live?.depsKey) await s.install(candidate);
       else linkNodeModules(s.p.live, candidate);
@@ -426,7 +492,7 @@ class LiveMode {
       if (check && await s.superseded(sha)) return 'superseded';
       const snapshot = s.snapshot(`before-${short(sha)}`);
       s.save({ status: 'restarting' });
-      await s.stopChild();
+      await s.stopChildren();
       if (key === s.state.live?.depsKey) {
         // Same dependencies: move the real install over (only once nothing runs from it).
         for (const dir of ['', ...workspaces(candidate)]) {
@@ -443,7 +509,7 @@ class LiveMode {
         await this.startChild(sha);
         await s.waitHealthy(sha, s.c.startTimeout);
       } catch (error) {
-        await s.stopChild();
+        await s.stopChildren();
         const live = s.p.live;
         if (existsSync(`${live}.old`)) {
           // Give a moved (shared) install back to the old tree before discarding the candidate.
@@ -551,18 +617,20 @@ class ReleaseMode {
     }
   }
 
-  async startRelease(release) {
+  /** Start game processes of a release (default: all of them) and wait until each is healthy. */
+  async startRelease(release, indexes = Array.from({ length: this.s.processes }, (_, i) => i)) {
     const { s } = this;
-    s.spawnChild(join(release.dir, s.c.gamePath), ['run', 'start'], {
-      ...process.env, NODE_ENV: 'production', GAIME_PORT: String(s.c.port), GAIME_DATA_DIR: s.c.dataDir, GAIME_VERSION: release.sha,
-    });
-    await s.waitHealthy(release.sha, s.c.startTimeout);
-    publish(this.clientDir(release), s.c.publicDir, release.sha, s.c.game);
-    log(`Game ready: http://localhost:${s.c.port} • ${short(release.sha)} (release)`);
+    const started = indexes.map(index => s.spawnChild(join(release.dir, s.c.gamePath), ['run', 'start'], {
+      ...process.env, NODE_ENV: 'production', GAIME_DATA_DIR: s.c.dataDir, GAIME_VERSION: release.sha, ...processEnv(s.c, index),
+    }, index));
+    await s.waitHealthy(release.sha, s.c.startTimeout, s.c.soakMs, Date.now(), started);
+    // Only a complete start publishes (a single restarted process serves the release that is already published).
+    if (indexes.length === s.processes) publish(this.clientDir(release), s.c.publicDir, release.sha, s.c.game);
+    log(`Game ready: http://localhost:${s.c.port} • ${short(release.sha)} (release${s.processes > 1 ? `, process${indexes.length > 1 ? 'es' : ''} ${indexes.join(', ')}` : ''})`);
   }
 
-  async startCurrent() {
-    await this.startRelease(this.s.state.current);
+  async startCurrent(indexes) {
+    await this.startRelease(this.s.state.current, indexes);
   }
 
   async prepare(sha) {
@@ -610,13 +678,13 @@ class ReleaseMode {
     if (check && await s.superseded(sha)) { rmSync(release.dir, { recursive: true, force: true }); return 'superseded'; }
     markDeploying(s.c.publicDir, old?.sha ?? null);
     s.save({ status: 'restarting' });
-    await s.stopChild();
+    await s.stopChildren();
     const snapshot = s.snapshot(`before-${short(sha)}`);
     s.save({ pending: { release, old, snapshot } });
     try {
       await this.startRelease(release);
     } catch (error) {
-      await s.stopChild();
+      await s.stopChildren();
       s.restoreCheckpoint(snapshot);
       s.save({ pending: null });
       if (old && this.canStart(old)) {
@@ -636,7 +704,7 @@ class ReleaseMode {
     if (!previous?.dir || !this.canStart(previous)) throw new Error('There is no previous release to roll back to.');
     const current = s.state.current;
     markDeploying(s.c.publicDir, current?.sha ?? null);
-    await s.stopChild();
+    await s.stopChildren();
     s.snapshot(`rollback-from-${short(current?.sha)}`);
     // Code and save go back together: newer saves may not be readable by older code.
     if (previous.checkpoint) s.restoreCheckpoint(previous.checkpoint);
@@ -659,6 +727,15 @@ class ReleaseMode {
 }
 
 function safe(fn) { try { return fn(); } catch { return undefined; } }
+
+const exited = child => child.exitCode !== null || child.signalCode !== null;
+
+/** The game server's admin token file (same format as @gaime/core), created once for all processes. */
+function ensureAdminToken(dataDir) {
+  const file = join(dataDir, 'admin-token');
+  if (process.env.GAIME_ADMIN_TOKEN || existsSync(file)) return;
+  try { writeFileSync(file, randomBytes(24).toString('hex'), { mode: 0o600, flag: 'wx' }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+}
 
 async function ensureFreePort(port) {
   await new Promise((resolve, reject) => {

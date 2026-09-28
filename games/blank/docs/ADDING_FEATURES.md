@@ -93,7 +93,7 @@ Rules that keep it safe for everyone playing:
 
 - **No state outside the world**: counters and cooldowns live in `player.data` with your prefix; no module-level variables, `setTimeout` or `Date.now()`.
 - **Through the `Sim`**: spawn with `sim.spawnPickup` (it sets the expiry timer and triggers `pickup.spawned`), randomness from `sim.random()`, time from `sim.world.time`.
-- **Later, once** → a timer: `sim.after(seconds, event, data, { key: 'ola-rush:<id>' })` fires one of the game's `Events` later. Blank's `Sim` accepts only declared events, so a module that needs its own delayed event adds it to `Events` in `src/shared/types.ts` (or asks for a `Sim` helper).
+- **Later, once** → a timer: `sim.after(seconds, event, data, { key: 'ola-rush:<id>' })` fires an event later — one of the game's `Events`, or a private one of your module named `<module-id>:<event>` (`'ola-rush:end'`), handled by your own `on` without declaring it anywhere.
 - **Movement speed is predicted by the client** (`movePlayer` in `src/shared/rules.ts`), so it must not come from a modifier; change it in the shared rules instead.
 - **Names are global**: command types `<module>-<action>`, system ids unique in your module, data keys prefixed.
 - **Errors switch your module off**, not the game: a ⚠ line in the feed and `disabled` in `/health` until a fix is pushed. Tests are strict and throw instead.

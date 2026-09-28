@@ -18,6 +18,8 @@ import { tactics, threatInput } from './tactics';
 export const game = defineGame<World, Input, Sim, Events, Modifiers>({
   name: 'starter',
   maxPlayers: 24,
+  // Shared spatial indexes (ctx.near / ctx.nearest): rebuilt once per tick for every system and module.
+  spatial: { enemies: { cell: 4 }, players: { cell: 8 } },
   network: {
     entities: ['players', 'enemies'],
     streams: ['feed', 'effects'],

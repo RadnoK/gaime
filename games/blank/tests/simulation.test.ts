@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { seeded } from '@gaime/core';
-import { testGame } from '@gaime/core/server';
+import { replay, testGame } from '@gaime/core/server';
 import { game } from '../src/server/game';
 import { registry } from '../src/server/registry';
 import { RULES } from '../src/shared/rules';
@@ -65,5 +65,17 @@ describe('blank', () => {
     const bot = t.addBot();
     t.run(20);
     expect(t.player(bot).score).toBeGreaterThan(0);
+  });
+});
+
+describe('determinism', () => {
+  test('a recorded session replays exactly', () => {
+    const t = testGame(game, { seed: 5, record: true });
+    const ada = t.join('Ada');
+    t.addBot();
+    for (let second = 0; second < 30; second++) { t.input(ada, { mx: Math.sin(second), mz: Math.cos(second) }); t.run(1); }
+    const result = replay(game, JSON.parse(JSON.stringify(t.recording())));
+    expect(result.diverged).toBeUndefined();
+    expect(JSON.stringify(result.world)).toBe(JSON.stringify(t.world));
   });
 });

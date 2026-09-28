@@ -24,6 +24,8 @@ interface Metrics {
   /** Simulated time the server could not keep up with (catch-up limit), in ms. */
   droppedMs: Sample[];
   engine: EngineCounters;
+  /** Modules over their time budget: owner → throttle factor. */
+  throttled: Record<string, number>;
 }
 
 type Part = { calls: number; total: number; max: number };
@@ -39,6 +41,7 @@ function metrics(): Metrics {
       tick: [], publish: [], bytes: [], loop, loopSince: Date.now(), loopLast: null, clients: 0, tickRate: 0,
       parts: new Map(), partsLast: new Map(), partsSince: Date.now(), droppedMs: [],
       engine: { events: 0, timers: 0, timersPending: 0, deferredTimers: 0, droppedEvents: 0 },
+      throttled: {},
     };
   }
   return store[KEY]!;
@@ -84,6 +87,11 @@ export const recordClients = (count: number) => { metrics().clients = count; };
 export const recordTickRate = (hz: number) => { metrics().tickRate = hz; };
 export const recordDropped = (ms: number) => push(metrics().droppedMs, ms);
 export const recordEngine = (counters: EngineCounters) => { metrics().engine = counters; };
+export const recordThrottle = (owner: string, factor: number) => {
+  const m = metrics();
+  m.throttled ??= {};
+  if (factor > 1) m.throttled[owner] = factor; else delete m.throttled[owner];
+};
 
 /** Time spent in one named part of the simulation (a system, an event handler, a command). */
 export function recordPart(name: string, ms: number) {
@@ -119,6 +127,7 @@ export function stats() {
     eventLoopDelayMs: loop,
     droppedMs: Math.round(m.droppedMs.reduce((sum, sample) => sum + sample.value, 0)),
     engine: m.engine,
+    throttled: m.throttled ?? {},
     /** Where the tick time goes: systems, event handlers and commands by module. */
     parts: topParts(m),
     memoryMb: Math.round(process.memoryUsage().rss / 1048576),

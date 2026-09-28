@@ -1,73 +1,109 @@
 import type { NextFunction, Request, Response } from 'express';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { defineRoom, defineServer, matchMaker } from 'colyseus';
+import { timingSafeEqual } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { defineRoom, defineServer, isDevMode } from 'colyseus';
+import { RedisDriver } from '@colyseus/redis-driver';
+import { RedisPresence } from '@colyseus/redis-presence';
 import type { BaseWorld, Health } from '../shared/types';
 import type { GameDefinition } from './game';
-import { createRoomClass } from './room';
-import { dataDir, markLoaded, runtime } from './runtime';
+import { createRoomClass, listRecordings } from './room';
+import { adminToken, markLoaded, runtime } from './runtime';
+import { createMatchmaker, HttpError } from './matchmaking';
 import { stats } from './metrics';
 import { closeStalePools, poolStats } from './workers';
 
 export * from './game';
 export { createRoomClass } from './room';
 export { readCheckpoint, saveCheckpoint, checkpointPath } from './persistence';
-export { runtime, codeVersion } from './runtime';
+export { runtime, codeVersion, adminToken } from './runtime';
+export { normalizeCode, type RoomSummary, type RoomMetadata } from './matchmaking';
 export { workerPool, WorkerPool, type PoolOptions, type PoolStats } from './workers';
 export { testContext, testGame, type TestGameOptions } from './testing';
 export { Engine, type EngineHost } from './engine';
+export { replay, type ReplayOptions } from './replay';
+export { worldHash, type Recording, type Segment, type Entry, type ReplayResult } from './recorder';
 
-/** Token for `/gaime/admin/*`: GAIME_ADMIN_TOKEN, or a random one kept in the data directory. */
-export function adminToken(): string {
-  if (process.env.GAIME_ADMIN_TOKEN) return process.env.GAIME_ADMIN_TOKEN;
-  const file = join(dataDir(), 'admin-token');
-  if (existsSync(file)) return readFileSync(file, 'utf8').trim();
-  mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
-  const token = randomBytes(24).toString('hex');
-  writeFileSync(file, token, { mode: 0o600 });
-  return token;
+const warned = new Set<string>();
+const warnOnce = (text: string) => { if (!warned.has(text)) { warned.add(text); console.warn(`[gaime] ${text}`); } };
+
+/**
+ * Horizontal scaling (matches mode, production builds): with `GAIME_REDIS_URL` every process shares
+ * the room listing and talks to the others through Redis; `GAIME_PUBLIC_ADDRESS` (host[:port][/path])
+ * is where clients reach this process's rooms. Connections are created once per process.
+ */
+function scaling(game: GameDefinition<any, any, any, any>) {
+  const publicAddress = process.env.GAIME_PUBLIC_ADDRESS || undefined;
+  const url = process.env.GAIME_REDIS_URL;
+  const base = publicAddress ? { publicAddress } : {};
+  if (!url) return base;
+  if (isDevMode) { warnOnce('GAIME_REDIS_URL is used by production builds only (release mode); the dev server runs one process.'); return base; }
+  if (game.rooms?.mode !== 'matches') { warnOnce('GAIME_REDIS_URL is ignored: a shared game runs its one room in one process.'); return base; }
+  const key = Symbol.for('gaime.redis');
+  const store = globalThis as unknown as Record<symbol, { presence: RedisPresence; driver: RedisDriver } | undefined>;
+  const redis = store[key] ??= { presence: new RedisPresence(url), driver: new RedisDriver(url) };
+  return { ...base, presence: redis.presence, driver: redis.driver };
 }
 
 /**
  * The server entry of a game: `export const server = createGameServer(game)`.
  *
  * Routes: `/health` (loaded version + error, used by the supervisor and clients),
- * `/gaime/room` (id of the single shared room), `/gaime/stats` (tick/publish/worker costs),
- * `/gaime/admin/*` (operator API for the `gaime` CLI, token required).
- * In production builds it also serves `dist/client`.
+ * `/gaime/room` (matchmaking: `GET` → a room id, `POST` → a seat reservation; docs/ROOMS.md),
+ * `/gaime/stats` (tick/publish/worker costs), `/gaime/admin/*` (operator API for the `gaime` CLI,
+ * token required, `?room=<id|code>` picks a room). In production builds it also serves `dist/client`.
  */
 export function createGameServer<W extends BaseWorld, I>(game: GameDefinition<W, I, any, any>) {
+  const rooms = game.rooms ?? { mode: 'shared' as const };
+  if (rooms.mode === 'matches' && !(Number.isInteger(rooms.size) && rooms.size >= 1)) throw new Error(`rooms.size must be a whole number ≥ 1 (got ${rooms.size}).`);
   // Evaluated again on every hot reload: this is how the supervisor learns the new code is live.
-  markLoaded(game.name);
+  markLoaded(game.name, rooms);
   closeStalePools();
   // Simulated network round trip for latency testing (Colyseus reads COLYSEUS_LATENCY).
   if (process.env.GAIME_LATENCY_MS) process.env.COLYSEUS_LATENCY = process.env.GAIME_LATENCY_MS;
-  let creating: Promise<string> | undefined;
-  const roomId = async () => {
-    const rooms = await matchMaker.query({ name: game.name });
-    if (rooms[0]) return rooms[0].roomId;
-    creating ??= matchMaker.createRoom(game.name, {}).then(room => room.roomId).finally(() => { creating = undefined; });
-    return creating;
+  const matchmaker = createMatchmaker(game.name);
+  const processIndex = Number(process.env.GAIME_PROCESS_INDEX) || 0;
+  if (rooms.mode === 'shared' && processIndex > 0) warnOnce(`Process ${processIndex}: a shared game runs in process 0 only — this one stays idle.`);
+  const fail = (res: Response, error: unknown, status = 503) => {
+    if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
+    if (status === 503) { console.error('[gaime] room', error); res.status(503).set('Retry-After', '2').json({ error: 'Game temporarily unavailable.' }); return; }
+    res.status(status).json({ error: (error as Error).message });
   };
+  // Express handlers are registered once per process and outlive hot reloads: read live values from runtime().
+  const idle = () => runtime().mode.mode === 'shared' && processIndex > 0;
+  const localRooms = () => Object.values(runtime().rooms);
 
   return defineServer({
     rooms: { [game.name]: defineRoom(createRoomClass(game)) },
+    ...scaling(game),
     express: async app => {
       const { default: express } = await import('express');
       app.get('/health', (_req: Request, res: Response) => {
         const status = runtime();
-        res.set('Cache-Control', 'no-store').json({
+        const health: Health = {
           ok: !status.error, game: status.game, version: status.loaded, error: status.error,
           ...(Object.keys(status.disabled).length ? { disabled: status.disabled } : {}),
           uptime: Math.round((Date.now() - status.startedAt) / 1000),
-        } satisfies Health);
+        };
+        res.set('Cache-Control', 'no-store').json({ ...health, rooms: localRooms().length });
       });
-      app.get('/gaime/room', async (_req: Request, res: Response) => {
-        try { res.set('Cache-Control', 'no-store').json({ roomId: await roomId() }); }
-        catch (error) { console.error('[gaime] room', error); res.status(503).set('Retry-After', '2').json({ error: 'Game temporarily unavailable.' }); }
+      app.get('/gaime/room', async (req: Request, res: Response) => {
+        try {
+          if (idle()) throw new HttpError(503, 'This process is idle (a shared game runs in process 0).');
+          res.set('Cache-Control', 'no-store').json(await matchmaker.peek({ code: req.query.code, create: req.query.create }));
+        } catch (error) { fail(res, error); }
       });
-      app.get('/gaime/stats', (_req: Request, res: Response) => { res.set('Cache-Control', 'no-store').json({ ...stats(), workers: poolStats() }); });
+      app.post('/gaime/room', express.json({ limit: '16kb' }), async (req: Request, res: Response) => {
+        try {
+          if (idle()) throw new HttpError(503, 'This process is idle (a shared game runs in process 0).');
+          res.set('Cache-Control', 'no-store').json(await matchmaker.join((req.body ?? {}) as Record<string, unknown>));
+        } catch (error) { fail(res, error); }
+      });
+      app.get('/gaime/stats', (_req: Request, res: Response) => {
+        const matches = runtime().mode.mode === 'matches';
+        const clients = localRooms().reduce((sum, room) => sum + room.clients.length, 0);
+        res.set('Cache-Control', 'no-store').json({ ...stats(), ...(matches ? { clients } : {}), rooms: localRooms().length, workers: poolStats() });
+      });
 
       const token = adminToken();
       const authorised = (req: Request, res: Response, next: NextFunction) => {
@@ -78,12 +114,13 @@ export function createGameServer<W extends BaseWorld, I>(game: GameDefinition<W,
       };
       const admin = async (req: Request, res: Response) => {
         try {
-          // Express handlers outlive hot reloads: always ask the room that is live right now.
-          await roomId();
-          const room = runtime().room;
-          if (!room) throw new Error('The game room is not running.');
-          res.set('Cache-Control', 'no-store').json(await room.admin(String(req.params.action), (req.body ?? {}) as Record<string, unknown>));
-        } catch (error) { res.status(400).json({ error: (error as Error).message }); }
+          const action = String(req.params.action);
+          const body = (req.body ?? {}) as Record<string, unknown>;
+          const target = String(req.query.room ?? body.room ?? '') || undefined;
+          // Process-wide actions need no room (the listing covers every room's recordings).
+          const result = action === 'rooms' ? await matchmaker.list() : action === 'replays' ? listRecordings() : await matchmaker.admin(target, action, body);
+          res.set('Cache-Control', 'no-store').json(result);
+        } catch (error) { fail(res, error, 400); }
       };
       app.get('/gaime/admin/:action', authorised, admin);
       app.post('/gaime/admin/:action', authorised, express.json({ limit: '256kb' }), admin);

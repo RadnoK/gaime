@@ -3,7 +3,7 @@
  * on the client (prediction, previews) and in tests. Nothing here touches the network.
  */
 export { SpatialHash } from './spatial';
-export { circlesOverlap, pointInRect, circleRect, rayCircle, raycast, rayEnd, separate, clampToCircle, keepOutOfCircle, clampToRect, type Rect, type RayHit } from './collision';
+export { circlesOverlap, pointInRect, circleRect, rayCircle, raycast, rayEnd, separate, separateWith, clampToCircle, keepOutOfCircle, clampToRect, type Rect, type RayHit } from './collision';
 export { launch, stepProjectiles, wasHit, ballisticAngle, type Projectile, type LaunchOptions, type StepProjectilesOptions } from './projectiles';
 export { cooldown, every, schedule, due, status } from './timers';
 export { createMatch, setReady, stepMatch, endMatch, toLobby, matchTimeLeft, type MatchState, type MatchPhase, type MatchRules, type MatchEvent } from './match';

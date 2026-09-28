@@ -84,8 +84,13 @@ curl -s localhost:5173/gaime/stats | jq '{tickMs, droppedMs, engine, parts}'
 - `parts`: the 15 most expensive systems (`<owner>/<id>`), handlers (`<owner> on <event>`) and commands (`<owner> command <type>`), in `msPerSecond` (share of every second spent there), `callsPerSecond` and `maxMs` (the worst single call — spikes). The owner is `game` or a module id, so you know whose code to fix.
 - `droppedMs` > 0: the fixed-step clock could not catch up (limit 3 ticks) and simulated time was dropped — players saw slow motion.
 - `engine`: `events` / `timers` fired since the last code load, `timersPending`, `deferredTimers` (ticks that hit the 5 000-timers limit), `droppedEvents` (client events over the per-client cap).
+- `throttled`: modules over their time budget (default 20% of the tick) → factor 2/4/8 — their systems run only every n-th tick until they get cheaper (`docs/SIMULATION.md#module-time-budgets`).
 
-Fixes: `SpatialHash` for neighbour queries, `every` on systems for AI and spawners (think at 5 Hz, not 30), handlers that do less per event, workers for heavy work (`gaime-worker` skill).
+Fixes: the engine's spatial index for neighbour queries (`spatial` in `defineGame` + `ctx.near` / `ctx.nearest`, one rebuild per tick for everyone; `separateWith` for crowds), `every` on systems for AI and spawners (think at 5 Hz, not 30), handlers that do less per event, workers for heavy work (`gaime-worker` skill).
+
+## Many players: rooms
+
+One shared world has one room in one process: its tick cost and patch size grow with everyone in it. Games made of sessions (rounds, duels, parties) can use `rooms: { mode: 'matches', size }` instead — many small rooms, each with its own engine and world, matchmaking and invite codes (`GameClient({ match })`, `net.invite`). In release mode they can spread over several processes with Redis (`GAIME_PROCESSES`, `GAIME_REDIS_URL`). `gaime load` matchmakes every bot like a player. Details: `docs/ROOMS.md`, `docs/DEPLOYMENT.md#scaling-out`.
 
 ## Pitfalls
 
@@ -98,4 +103,4 @@ Fixes: `SpatialHash` for neighbour queries, `every` on systems for AI and spawne
 
 ## Reference
 
-`docs/PROTOCOL.md`, `docs/SERVER.md#per-player-views`, `docs/TESTING.md#load-and-latency-gaime-load`, `docs/reference/CONFIG.md` (NetworkConfig, tick and publish rates).
+`docs/PROTOCOL.md`, `docs/ROOMS.md`, `docs/SERVER.md#per-player-views`, `docs/TESTING.md#load-and-latency-gaime-load`, `docs/reference/CONFIG.md` (NetworkConfig, tick and publish rates).

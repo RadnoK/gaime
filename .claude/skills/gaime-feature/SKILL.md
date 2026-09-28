@@ -9,7 +9,7 @@ Content and behaviour in gaime games live in **modules**: `games/<game>/src/feat
 
 ## 1. Orient (do not skip)
 
-1. Identify the game (`games/starter` = Crystal, `games/duel` = Duel, `games/blank` = Blank, or another). Ask if unclear.
+1. Identify the game (`games/starter` = Crystal, `games/duel` = Duel, `games/blank` = Blank, `games/bumper` = Bumper, or another). Ask if unclear.
 2. Read `games/<game>/AGENTS.md` and `games/<game>/docs/ADDING_FEATURES.md`.
 3. Read `games/<game>/src/shared/types.ts`: `Kinds` lists the module kinds (e.g. `enemies`, `abilities`, `waves`, `weapons`, `pickups`) and their definition types; `Events` lists what happens in the game (what you can react to with `on`); `Modifiers` lists the values you can adjust with `modify`; `Sim` lists what module code may call.
 4. Read `docs/SIMULATION.md` once (where things go: systems, timers, events, modifiers, commands).
@@ -40,14 +40,15 @@ If the idea needs a new kind of content (e.g. "turrets" in a game without buildi
 - React to players with the engine events `player.joined` / `player.online` / `player.offline` / `player.removed` (`{ player }`) instead of asking for new hooks.
 - Modifiers run on the server only: never use them for values the client predicts (movement speed, collision size).
 - Change the world through the game's `Sim` helpers (`hurtEnemy`, `explode`, `spawn`, `spawnPickup`, `effect`, `emit`…) so scoring, deaths, events, effects and sounds stay consistent. Never call another module's code.
-- Randomness: `sim.random()` (seedable in tests), never `Math.random()` in server code.
+- Randomness: `sim.random()` / `ctx.random()` (the world's generator), **never `Math.random()`** in server code — the engine replays recorded sessions to debug live bugs, and one `Math.random()` makes every replay diverge.
+- Neighbour queries ("enemies within 5 m", "nearest player", separating a crowd): use the game's `Sim` helpers backed by the engine's spatial index (e.g. `sim.nearestEnemy` in starter; `ctx.near`/`ctx.nearest` on collections listed in `spatial`), never a loop over every entity for every entity. If the `Sim` has no such helper, add one in the core (`gaime-mechanic`).
 - Enemies need a way to appear: add or extend a wave/spawner in the same module.
 - Custom looks: `visual: { shape: '<my-shape>', color }` + `client.ts` exporting `{ models: { '<my-shape>': visual => THREE.Object3D } }` (≈1 unit tall, standing on y = 0, facing +Z). Built-in shapes: box, sphere, capsule, cone, cylinder, torus, octahedron, ring. glTF files: put them in `games/<game>/public/models/` and register with `models.load(shape, '/models/x.glb')` in the game's client setup.
 - Sounds/one-off client events: `sim.emit('sound', { kind })`, or rely on a bus event the game forwards (`network.events`); add the sound to the game's client (`src/client/main.ts`) if it is new.
 
 ## 3. Heavy logic?
 
-A tick has ~33 ms for everything. Prefer `every` on systems over per-tick work, iterate only what you need (`SpatialHash`). If the module needs pathfinding over a grid, big searches or procedural generation, use the `gaime-worker` skill (worker + `ctx.job`).
+A tick has ~33 ms for everything, and each module gets a budget of 20% of it: a module that costs more has its systems throttled to every 2nd–8th tick (`⚡` in the feed) until it gets cheaper. Prefer `every` on systems over per-tick work, iterate only what you need (the spatial index). If the module needs pathfinding over a grid, big searches or procedural generation, use the `gaime-worker` skill (worker + `ctx.job`).
 
 ## 4. Verify
 
@@ -57,10 +58,10 @@ npm test                                    # existing tests must stay green
 npx vitest run games/<game>                 # faster: only this game
 ```
 
-Add a test to `games/<game>/tests/` for non-trivial logic with `testGame(game, { random: seeded(1) })` from `@gaime/core/server` — the real engine, strict about errors, so a throwing handler fails the test:
+Add a test to `games/<game>/tests/` for non-trivial logic with `testGame(game, { seed: 1 })` from `@gaime/core/server` — the real engine, strict about errors, so a throwing handler fails the test:
 
 ```ts
-const t = testGame(game, { random: seeded(1) });
+const t = testGame(game, { seed: 1 });
 const ada = t.join('Ada');
 t.run(5);                                          // or t.act(sim => sim.spawnPickup('coin', t.player(ada))); t.tick();
 expect(t.triggeredOf('enemy.died')).toHaveLength(1);
@@ -78,7 +79,8 @@ Then, if a dev server runs: `cd games/<game> && npx gaime admin` lists helper co
 
 - [ ] One new directory; nothing edited outside it (except a test).
 - [ ] Ids (module, definitions, systems, commands, own events, timer keys) prefixed and stable.
-- [ ] No module-level state, `setTimeout`, `Date.now()`, `Math.random()`.
+- [ ] No module-level state, `setTimeout`, `Date.now()`, `Math.random()` (derived caches → `ctx.resource`; randomness → `sim.random()`).
+- [ ] Neighbour queries through the spatial index, not n².
 - [ ] Reactions via `on`, adjustments via `modify`, periodic work via systems with `every`, delays via timers — no polling, no calls into other modules.
 - [ ] Client values in `commands` validated; refusals returned as strings.
 - [ ] Every definition has `name` and `description`; content has a way to appear (a wave, a spawner).

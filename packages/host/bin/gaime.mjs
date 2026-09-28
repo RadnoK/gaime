@@ -19,12 +19,16 @@ Hosting and deploys
   gaime restart                restart the game process (the checkpoint stays)
 
 Running game (admin API, token from GAIME_ADMIN_TOKEN or <data>/admin-token)
+  gaime rooms                  rooms of the game (matches mode: id, invite code, players, locked)
   gaime players                players (online, host)
   gaime say <text>             announcement in the game feed
   gaime kick <nick>            remove a player
   gaime world [key]            world dump (JSON), optionally a single field
   gaime game pause|resume|save pause/resume the simulation, force a checkpoint
   gaime admin [command] [...]  commands defined by the game (GameDefinition.admin)
+  gaime replay [reason]        save the flight recording (last minutes, replayable) under <data>/replays
+  gaime replay --list          saved recordings (also saved by themselves after an error)
+  --room <id|code>             which room (matches mode; default: the only one)
 
 Tests
   gaime smoke [url] [--hmr]    end-to-end test with real WebSocket clients
@@ -37,11 +41,12 @@ Creating
 
 Environment: GAIME_MODE=live|release, GAIME_PORT, GAIME_URL, GAIME_BRANCH, GAIME_REMOTE, GAIME_POLL_MS,
 GAIME_GATES (e.g. "check,test"), GAIME_DATA_DIR, GAIME_STATE_DIR, GAIME_PUBLIC_DIR, GAIME_PUBLIC_URL,
-GAIME_LATENCY_MS (simulated server round trip). Details: docs/DEPLOYMENT.md, docs/PROTOCOL.md`;
+GAIME_LATENCY_MS (simulated server round trip), GAIME_PROCESSES + GAIME_REDIS_URL (release mode, matches).
+Details: docs/DEPLOYMENT.md, docs/ROOMS.md, docs/PROTOCOL.md`;
 
 const [command = 'help', ...args] = process.argv.slice(2);
 const flag = (name, fallback) => flagValue(args, name, fallback);
-const VALUED = new Set(['--bots', '--seconds', '--rate', '--input', '--chat', '--title', '--from']);
+const VALUED = new Set(['--bots', '--seconds', '--rate', '--input', '--chat', '--title', '--from', '--room']);
 const positional = () => args.filter((arg, i) => !arg.startsWith('--') && !VALUED.has(args[i - 1]));
 
 function config() {
@@ -68,8 +73,10 @@ async function admin(action, body) {
   const { url, tokens } = target();
   if (!tokens.length) throw new Error('No admin token: set GAIME_ADMIN_TOKEN or run inside the directory of a game that is running.');
   let response;
+  const room = flag('room');
+  const query = room ? `?room=${encodeURIComponent(room)}` : '';
   for (const token of tokens) {
-    response = await fetch(`${url}/gaime/admin/${action}`, {
+    response = await fetch(`${url}/gaime/admin/${action}${query}`, {
       method: body ? 'POST' : 'GET',
       headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
@@ -104,7 +111,14 @@ try {
       const running = alive(state.pid);
       if (json) { print({ ...state, running, health }); break; }
       console.log(`${c.game} · ${state.mode} · ${running ? `supervisor PID ${state.pid}` : 'supervisor not running'} · ${state.status}${state.paused ? ' · UPDATES PAUSED' : ''}`);
-      console.log(`version: ${short(state.current?.sha)}   previous: ${short(state.previous?.sha)}   game /health: ${health ? `${health.ok ? 'ok' : 'ERROR'} ${short(health.version)}${health.error ? ` — ${health.error}` : ''}` : 'no response'}`);
+      console.log(`version: ${short(state.current?.sha)}   previous: ${short(state.previous?.sha)}   game /health: ${health ? `${health.ok ? 'ok' : 'ERROR'} ${short(health.version)}${health.error ? ` — ${health.error}` : ''}${health.rooms !== undefined ? ` · ${health.rooms} room${health.rooms === 1 ? '' : 's'}` : ''}` : 'no response'}`);
+      if (state.processes > 1 && !process.env.GAIME_URL) {
+        const port = state.port ?? c.port;
+        const all = await Promise.all(Array.from({ length: state.processes }, async (_, i) => {
+          try { return await (await fetch(`http://127.0.0.1:${port + i}/health`, { signal: AbortSignal.timeout(1500) })).json(); } catch { return null; }
+        }));
+        console.log(`processes: ${all.map((h, i) => `p${i}:${port + i} ${h ? `${h.ok ? 'ok' : 'ERROR'} ${short(h.version)} ${h.rooms ?? 0} rooms` : 'no response'}`).join('   ')}`);
+      }
       if (state.failed) console.log(`last failed commit: ${short(state.failed.sha)} — ${state.failed.error}`);
       if (state.error && state.error !== state.failed?.error) console.log(`last error: ${state.error}`);
       for (const entry of (state.history ?? []).slice(0, 8)) console.log(`  ${entry.at?.slice(0, 19).replace('T', ' ')}  ${short(entry.sha)}  ${entry.result}${entry.seconds ? ` ${entry.seconds}s` : ''}  ${entry.subject ?? ''}${entry.error ? ` — ${entry.error}` : ''}`);
@@ -124,10 +138,30 @@ try {
       else { console.error(`${command} failed: ${control.error}`); process.exitCode = 1; }
       break;
     }
+    case 'rooms': {
+      const rooms = await admin('rooms');
+      for (const r of rooms) {
+        const flags = [r.private && 'private', r.locked && 'locked', r.full && 'full'].filter(Boolean).join(', ');
+        console.log(`${r.id.padEnd(10)} ${(r.code ?? '-').padEnd(6)} ${String(r.players).padStart(3)} players  ${String(r.clients).padStart(3)} connections  since ${r.createdAt.slice(11, 19)}${flags ? `  (${flags})` : ''}`);
+      }
+      if (!rooms.length) console.log('No rooms.');
+      break;
+    }
     case 'players': {
       const players = await admin('players');
       for (const p of players) console.log(`${p.online ? '●' : '○'} ${p.host ? '👑 ' : ''}${p.name}  ${p.id}`);
       if (!players.length) console.log('No players.');
+      break;
+    }
+    case 'replay': {
+      if (process.argv.includes('--list')) {
+        const files = await admin('replays');
+        for (const file of files) console.log(file);
+        if (!files.length) console.log('No recordings yet.');
+        break;
+      }
+      const { file } = await admin('replay', { reason: positional().join(' ') || 'manual' });
+      console.log(`Saved ${file}\nReplay it in a test: replay(game, JSON.parse(readFileSync(file, 'utf8'))) — docs/SIMULATION.md#determinism-and-replays`);
       break;
     }
     case 'say': print(await admin('say', { text: positional().join(' ') })); break;

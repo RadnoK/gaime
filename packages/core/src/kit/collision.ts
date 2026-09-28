@@ -59,8 +59,31 @@ export function rayEnd(origin: Vec2, angle: number, distance: number): Vec2 {
 }
 
 /**
+ * `separate` for crowds: only checks each item against `neighbours(item)` (e.g. the engine's
+ * `ctx.near('enemies', item, 2 * maxRadius)`), so it costs O(n·k) instead of O(n²).
+ * Items need ids; each pair is resolved once (the smaller id pushes).
+ */
+export function separateWith<T extends Vec2 & { id: string }>(items: T[], radiusOf: (item: T) => number, neighbours: (item: T) => Iterable<T>, strength = 0.5) {
+  for (const a of items) {
+    for (const b of neighbours(a)) {
+      if (b.id <= a.id) continue;
+      const min = radiusOf(a) + radiusOf(b);
+      const dx = b.x - a.x; const dz = b.z - a.z;
+      const d = Math.hypot(dx, dz);
+      if (d >= min) continue;
+      const angle = (a.id.length * 31 + b.id.length) * 2.399963;
+      const nx = d < 1e-6 ? Math.cos(angle) : dx / d;
+      const nz = d < 1e-6 ? Math.sin(angle) : dz / d;
+      const push = (min - d) * strength;
+      a.x -= nx * push; a.z -= nz * push;
+      b.x += nx * push; b.z += nz * push;
+    }
+  }
+}
+
+/**
  * Push overlapping circles apart (soft crowd separation). Mutates positions.
- * O(n²): fine for a few hundred items; use SpatialHash queries beyond that.
+ * O(n²): fine for a few hundred items; use `separateWith` and a spatial index beyond that.
  */
 export function separate<T extends Vec2>(items: T[], radiusOf: (item: T) => number, strength = 0.5) {
   for (let i = 0; i < items.length; i++) {

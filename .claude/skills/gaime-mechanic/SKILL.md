@@ -33,6 +33,9 @@ Comment every entry — this is the API other people's modules are written again
 | Something modules should be able to do | a method on `Sim`; when it calls a definition hook, wrap it in `ctx.isolate(registry.owner['<kind>/<id>'], …)` |
 | Query from the client (ranking, shop list) | `requests` in `defineGame` → `net.request(name)` |
 | One-off client feedback (sound, shake) | forward the event (`network.events: ['enemy.died']`) or `ctx.emit(name, data)` → `net.on('event', …)` |
+| Neighbour queries (targeting, crowd separation, pickups in range) | the engine's spatial index: `spatial: { enemies: { cell: 4 } }` in `defineGame` + `ctx.near('enemies', at, r)` / `ctx.nearest(...)`, exposed to modules through `Sim` helpers (`nearestEnemy`); crowds with kit `separateWith(items, radiusOf, e => ctx.near(...))` |
+| Derived state that is not saved (physics world, navigation grid, lookup cache) | `ctx.resource('<owner>-<name>', () => build(ctx.world), dispose)` — rebuilt from the world after a hot reload; add `{ save, load }` if it holds state the world does not (so replays stay exact) |
+| Rounds / sessions for a few players at a time | consider `rooms: { mode: 'matches', size }` (many rooms, invite codes) and `ctx.lockRoom(true)` while a round runs — `docs/ROOMS.md` |
 
 Timed state that code *reads* (stun, shield, cooldown) stays in the kit (`status`, `cooldown` in `data`); timers are for things that must *happen*.
 
@@ -57,37 +60,48 @@ Timed state that code *reads* (stun, shield, cooldown) stays in the kit (`status
 - Server-only helper state that clients do not need: list the key in `network.hidden`.
 - Big dictionaries that change often: list them in `network.entities`.
 
-## 4. Use the kit instead of re-inventing
+## 4. Keep it deterministic
 
-`@gaime/core/kit` (docs/KIT.md): `moveTopDown`, `clampToCircle`/`clampToRect`/`keepOutOfCircle`, `raycast`/`rayEnd`, `circlesOverlap`, `separate`, `SpatialHash` (many entities), `launch` + `stepProjectiles` (+ `ballisticAngle`), `cooldown.use`, `every`, `schedule`/`due`, `status.apply/value` (buffs, slows, stuns), `createMatch`/`setReady`/`stepMatch`/`endMatch` (rounds), `createTurns`/`nextTurn`/`freezeTurn` (turn-based), inventory (`addItem`, `takeItem`), `balancedTeam`, `weighted`/`shuffle`/`pointInRing`, `addEffect`/`pruneEffects`.
+The engine records every session and `replay()` must reproduce it exactly (docs/SIMULATION.md#determinism-and-replays) — that is how live bugs get fixed. So:
 
-## 5. Validate client input
+- randomness only from `ctx.random()` / `sim.random()` (the world's generator, `world.rng`); pass it to kit helpers (`weighted(ctx.random, …)`); never `Math.random()`;
+- no `Date.now()`/`performance.now()` in rules, no state outside the world except `ctx.resource` values rebuilt from it;
+- iterate the world's own records, not sets built from async results;
+- keep the game's record-and-replay test green (`testGame(game, { seed, record: true })` → `replay(game, t.recording())`, see `gaime-test`).
+
+## 5. Use the kit instead of re-inventing
+
+`@gaime/core/kit` (docs/KIT.md): `moveTopDown`, `clampToCircle`/`clampToRect`/`keepOutOfCircle`, `raycast`/`rayEnd`, `circlesOverlap`, `separate` / `separateWith` (crowds, with the spatial index), `SpatialHash` (client, workers — on the server prefer `spatial` + `ctx.near`), `launch` + `stepProjectiles` (+ `ballisticAngle`), `cooldown.use`, `every`, `schedule`/`due`, `status.apply/value` (buffs, slows, stuns), `createMatch`/`setReady`/`stepMatch`/`endMatch` (rounds), `createTurns`/`nextTurn`/`freezeTurn` (turn-based), inventory (`addItem`, `takeItem`), `balancedTeam`, `weighted`/`shuffle`/`pointInRing`, `addEffect`/`pruneEffects`.
+
+## 6. Validate client input
 
 Everything from the client is untrusted: check types (`Number.isFinite`), clamp ranges, check ownership/turn/cooldown/cost on the server. Return a string from `command()` to show the player why an action was refused.
 
-## 6. Keep the client in sync
+## 7. Keep the client in sync
 
 - If you changed shared movement, prediction on the client uses the same function automatically.
 - Show new state in the HUD (`src/client/hud.ts` / `main.ts`) and scene; read the catalog for module data.
 - New sound or event → handle it in the client's `net.on('event')` (forwarded bus events carry their payload).
 
-## 7. Verify
+## 8. Verify
 
 ```sh
 npm run check && npx vitest run games/<game>
 ```
 
-Write or extend a test in `games/<game>/tests/` with `testGame(game, { random: seeded(1) })` — the same engine as the server: `t.join`, `t.input`, `t.run(seconds)`, `t.command`, then assert on the world and on `t.triggeredOf('<event>')`; `t.ctx.timeLeft(key)` for timers. For saves: `testGame(game, { world: oldShapedWorld })` hydrates and migrates it like a checkpoint — assert the new fields. With a dev server running, poke the live game: `cd games/<game> && npx gaime world <field>`, `npx gaime admin …`.
+Write or extend a test in `games/<game>/tests/` with `testGame(game, { seed: 1 })` — the same engine as the server: `t.join`, `t.input`, `t.run(seconds)`, `t.command`, then assert on the world and on `t.triggeredOf('<event>')`; `t.ctx.timeLeft(key)` for timers. For saves: `testGame(game, { world: oldShapedWorld })` hydrates and migrates it like a checkpoint — assert the new fields. With a dev server running, poke the live game: `cd games/<game> && npx gaime world <field>`, `npx gaime admin …`.
 
 ## Pitfalls
 
 - `setTimeout`, module-level `let`, closures holding state → lost on hot reload, not saved. Use timers and `data`.
 - Calling modules from the core, or modules calling each other → use events and modifiers.
 - A handler that triggers its own event → event storm, the owner is switched off (a module) or the game pauses (game code).
-- `Math.random()` / `Date.now()` in the simulation → untestable, inconsistent; use `ctx.random`, `world.time`.
+- `Math.random()` / `Date.now()` in the simulation → untestable, breaks replays; use `ctx.random`, `world.time`.
+- Looping every entity over every entity → the module or game eats the tick (modules get throttled over their time budget, `⚡` in the feed); use the spatial index.
+- A module-level cache (`const grid = new SpatialHash()`, `let navMesh`) → survives nothing and breaks replays; use `ctx.resource`.
 - Changing `name` in `defineGame` resets everyone's identity and the save. Don't.
 - A thrown exception in `step` or the game's own systems/handlers pauses the game for everyone — test before pushing (`testGame` is strict and throws).
 
 ## Reference
 
-`docs/SIMULATION.md` (the model), `docs/SERVER.md` (context, commands, errors, persistence), `docs/KIT.md`, `docs/COOKBOOK.md` (events, modifiers, timers, rounds, teams, turns, shops, hidden information, migrations), `games/blank` (the reference implementation).
+`docs/SIMULATION.md` (the model: spatial index, resources, budgets, determinism), `docs/SERVER.md` (context, commands, errors, persistence, rooms, replays), `docs/ROOMS.md`, `docs/PHYSICS.md`, `docs/KIT.md`, `docs/COOKBOOK.md` (events, modifiers, timers, rounds, teams, turns, shops, hidden information, migrations), `games/blank` (the reference implementation).

@@ -16,6 +16,8 @@
     "./vite": "./src/vite/index.ts"
   },
   "dependencies": {
+    "@colyseus/redis-driver": "^0.18.4",
+    "@colyseus/redis-presence": "^0.18.5",
     "@colyseus/sdk": "^0.18.4",
     "colyseus": "^0.18.8",
     "three": "^0.186.1"

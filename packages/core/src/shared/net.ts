@@ -64,8 +64,8 @@ export function resolveNetwork(config: NetworkConfig = {}): ResolvedNetwork {
     entities: new Set(config.entities ?? ['players']),
     streams: new Set(config.streams ?? ['feed']),
     precision: { ...DEFAULT_PRECISION, ...config.precision },
-    // The timer queue is engine state: it never leaves the server.
-    hidden: new Set(['schedule', ...(config.hidden ?? [])]),
+    // The timer queue and the random state are engine state: they never leave the server.
+    hidden: new Set(['schedule', 'rng', ...(config.hidden ?? [])]),
     shared: new Set(config.shared ?? []),
     events: new Set(config.events ?? []),
   };

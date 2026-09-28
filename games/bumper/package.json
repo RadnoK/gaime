@@ -1,0 +1,22 @@
+{
+  "name": "bumper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bumper — a physics sumo arena: push the others off the edge, last disc standing wins the round.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --app",
+    "start": "node dist/server/server.mjs",
+    "check": "tsc --noEmit -p .",
+    "test": "vitest run --root ../.. games/bumper",
+    "host": "gaime host",
+    "smoke": "gaime smoke",
+    "load": "gaime load --input '{\"mx\":\"$rand\",\"mz\":\"$rand\"}'"
+  },
+  "dependencies": {
+    "@gaime/core": "*",
+    "@gaime/host": "*",
+    "@gaime/physics": "*"
+  }
+}

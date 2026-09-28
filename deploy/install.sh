@@ -3,17 +3,19 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/deploy/install.sh -o install.sh
 #   sudo bash install.sh <game> <domain> <git-url> [--mode live|release] [--proxy traefik|caddy|none]
-#                        [--password] [--dir /srv/gaime] [--branch main] [--print-deploy-key]
+#                        [--password] [--dir /srv/gaime] [--branch main] [--processes N] [--print-deploy-key]
 #
 # --print-deploy-key: only create the read-only deploy key (SSH git URLs), print its public
 # half and exit — for scripted setups that add it with `gh repo deploy-key add` first.
+# --processes N (N > 1): N game processes sharing their rooms through Redis — release mode and
+# a game with rooms: { mode: 'matches' } only (docs/DEPLOYMENT.md "Scaling out").
 # Afterwards every push to the branch reaches the players automatically.
 set -euo pipefail
 
-usage() { sed -n '2,10p' "$0"; exit 1; }
+usage() { sed -n '2,14p' "$0"; exit 1; }
 [[ $# -ge 3 ]] || usage
 GAME=$1; DOMAIN=$2; REPO_URL=$3; shift 3
-MODE=live; PROXY=traefik; PASSWORD=0; BASE_DIR=/srv/gaime; BRANCH=main; PRINT_KEY=0
+MODE=live; PROXY=traefik; PASSWORD=0; BASE_DIR=/srv/gaime; BRANCH=main; PROCESSES=1; PRINT_KEY=0
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mode) MODE=$2; shift 2 ;;
@@ -21,12 +23,15 @@ while [[ $# -gt 0 ]]; do
     --password) PASSWORD=1; shift ;;
     --dir) BASE_DIR=$2; shift 2 ;;
     --branch) BRANCH=$2; shift 2 ;;
+    --processes) PROCESSES=$2; shift 2 ;;
     --print-deploy-key) PRINT_KEY=1; shift ;;
     *) usage ;;
   esac
 done
 [[ $GAME =~ ^[a-z][a-z0-9-]+$ ]] || { echo "Game name: lowercase letters, digits, dashes."; exit 1; }
 [[ $MODE == live || $MODE == release ]] || { echo "--mode live|release"; exit 1; }
+[[ $PROCESSES =~ ^[0-9]+$ && $PROCESSES -ge 1 && $PROCESSES -le 16 ]] || { echo "--processes 1…16"; exit 1; }
+[[ $PROCESSES == 1 || $MODE == release ]] || { echo "--processes needs --mode release (live mode runs one Vite dev server)"; exit 1; }
 for tool in docker git ssh-keygen ssh-keyscan; do command -v "$tool" >/dev/null || { echo "Missing: $tool"; exit 1; }; done
 docker compose version >/dev/null || { echo "Missing docker compose v2"; exit 1; }
 
@@ -68,19 +73,21 @@ fi
 mkdir -p "$BASE/repo/.gaime/$GAME/public"
 
 # ── compose + gateway ─────────────────────────────────────────────────
-for file in compose.yml compose.traefik.yml compose.caddy.yml Caddyfile gateway.conf; do cp "$BASE/repo/deploy/docker/$file" "$BASE/$file"; done
+for file in compose.yml compose.traefik.yml compose.caddy.yml compose.redis.yml Caddyfile gateway.conf; do cp "$BASE/repo/deploy/docker/$file" "$BASE/$file"; done
 case $PROXY in
   traefik) COMPOSE_FILE=compose.yml:compose.traefik.yml ;;
   caddy) COMPOSE_FILE=compose.yml:compose.caddy.yml ;;
   none) COMPOSE_FILE=compose.yml ;;
   *) echo "--proxy traefik|caddy|none"; exit 1 ;;
 esac
+[[ $PROCESSES == 1 ]] || COMPOSE_FILE="$COMPOSE_FILE:compose.redis.yml"
 if [[ ! -f $BASE/.env ]]; then
   # Each game on the host gets its own local gateway port.
   PORT=8080; while grep -qs "GATEWAY_BIND=127.0.0.1:$PORT" "$BASE_DIR"/*/.env; do PORT=$((PORT + 1)); done
   sed -e "s/^GAME=.*/GAME=$GAME/" -e "s/^DOMAIN=.*/DOMAIN=$DOMAIN/" -e "s/^GAIME_MODE=.*/GAIME_MODE=$MODE/" \
       -e "s/^GAIME_BRANCH=.*/GAIME_BRANCH=$BRANCH/" -e "s#^COMPOSE_FILE=compose.yml:compose.traefik.yml#COMPOSE_FILE=$COMPOSE_FILE#" \
       -e "s/^GATEWAY_BIND=.*/GATEWAY_BIND=127.0.0.1:$PORT/" "$BASE/repo/deploy/docker/env.example" > "$BASE/.env"
+  [[ $PROCESSES == 1 ]] || echo "GAIME_PROCESSES=$PROCESSES" >> "$BASE/.env"
   echo "Wrote $BASE/.env (local gateway port: $PORT)"
 fi
 

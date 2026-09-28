@@ -8,6 +8,8 @@ export interface ChatHost<W extends BaseWorld> {
   bots?: boolean;
   rename(playerId: string, name: string): string | void;
   pause(playerId: string, paused: boolean): string | void;
+  /** No flood limit (replays run faster than real time). */
+  unlimited?: boolean;
 }
 
 const MAX_LENGTH = 200;
@@ -102,11 +104,13 @@ export function createChat<W extends BaseWorld>(game: GameDefinition<W, unknown>
     if (!player || typeof raw !== 'string') return;
     let text = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_LENGTH);
     if (!text) return;
-    const now = Date.now();
-    const recent = (history[id] ?? []).filter(at => now - at < WINDOW_MS);
-    if (recent.length && now - recent[recent.length - 1] < MIN_INTERVAL_MS) return 'Slow down a little.';
-    if (recent.length >= BURST) return 'Too many messages — wait a moment.';
-    history[id] = [...recent, now];
+    if (!host.unlimited) {
+      const now = Date.now();
+      const recent = (history[id] ?? []).filter(at => now - at < WINDOW_MS);
+      if (recent.length && now - recent[recent.length - 1] < MIN_INTERVAL_MS) return 'Slow down a little.';
+      if (recent.length >= BURST) return 'Too many messages — wait a moment.';
+      history[id] = [...recent, now];
+    }
 
     if (text.startsWith('/')) {
       const [name, ...rest] = text.slice(1).split(' ');

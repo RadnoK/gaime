@@ -13,7 +13,7 @@ import { cooldown, raycast, stepProjectiles, stepMatch } from '@gaime/core/kit';
 - **Mutation.** Functions that take an object and return nothing change it in place (`separate`, `clampToCircle`, `moveTopDown`, `stepProjectiles`, `setReady`...). The exception is `pruneEffects`, which returns a new array.
 - **The x/z plane.** Every position is a `Vec2 = { x: number; z: number }` (exported from `@gaime/core`). Top-down games use x/z as the ground plane (Three.js y is up). Side-view games (artillery, platformers) treat **z as "up"**, and gravity then points to -Z.
 - **Angles.** Kit angles are **radians measured from +Z**: `0` points to +Z, `Math.PI / 2` to +X. That is the same as `angleTo` and Three.js `rotation.y` for a model facing +Z. The direction of angle `a` is `{ x: Math.sin(a), z: Math.cos(a) }`. **The one exception is `ballisticAngle`**, which returns radians from +X towards +Z (an elevation angle for side views). Convert it with `Math.PI / 2 - angle` before you pass it to `launch`.
-- **Randomness.** Functions that need randomness take a `random: () => number` argument. On the server, pass `ctx.random`. In tests, pass `seeded(n)` from `@gaime/core` to get reproducible results.
+- **Randomness.** Functions that need randomness take a `random: () => number` argument. On the server, pass `ctx.random` — the world's own generator, which keeps the game deterministic and replayable; never `Math.random`. In unit tests, pass `seeded(n)` from `@gaime/core` to get reproducible results (in `testGame`, seed the world instead: `{ seed: n }`).
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the world, `step` and hot reload fit together, and [SERVER.md](SERVER.md) for `GameContext`.
 
@@ -22,6 +22,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how the world, `step` and hot reload 
 ## Spatial: `SpatialHash`
 
 This is a uniform grid for proximity queries on the x/z plane. Rebuild it once per tick from the current entities, then ask "who is near this point" in about O(1) instead of O(n). It pays off from roughly a hundred entities. Below that, a plain loop (or `nearest` from `@gaime/core`) is fine.
+
+**On the server, prefer the engine's shared index**: list the collection in `GameDefinition.spatial` and query it with `ctx.near` / `ctx.nearest`. The engine then builds one grid per collection per tick for every system and module together, checks live positions, skips deleted entities and reports its cost in `/gaime/stats` ([SIMULATION.md](SIMULATION.md#spatial-index)). Use `SpatialHash` directly on the client, in workers, or for sets of things that are not a top-level world collection.
 
 ```ts
 class SpatialHash<T extends Vec2> {
@@ -39,7 +41,7 @@ class SpatialHash<T extends Vec2> {
 - `nearest` returns the closest item within `radius`, or `undefined`. On a tie, the first item found wins.
 - Items are stored by reference, and their position is read when they are inserted. If they move, rebuild the grid.
 - Cell keys are exact while the cell coordinates stay within |x / cellSize| < 2^27 and |z / cellSize| < 2^25, far beyond any game map.
-- **Do not store the grid in the world.** It is not serialisable. Create it inside `step`, or keep it in a module variable and rebuild it every tick. It never holds state that must survive a reload.
+- **Do not store the grid in the world.** It is not serialisable. Create it inside the system that uses it, or keep it in `ctx.resource('<module>-grid', () => new SpatialHash(4))` and rebuild it every tick — not in a module-level variable. It never holds state that must survive a reload.
 
 ```ts
 const grid = new SpatialHash<Enemy>(4).rebuild(Object.values(world.enemies));
@@ -67,7 +69,8 @@ interface RayHit<T> { item: T; distance: number; point: Vec2 }
 | `rayCircle(origin, direction, maxDistance, center, radius)` | `number \| null` | Distance along the ray to the first contact. `direction` must be a unit vector. Returns `0` when `origin` is inside the circle, and `null` when the ray misses, the circle is behind the origin, or the contact is beyond `maxDistance`. |
 | `raycast(origin, angle, range, items, radiusOf, filter?)` | `RayHit<T> \| undefined` | Hitscan. Returns the closest item whose circle (`radiusOf(item)`) is crossed by a ray from `origin` at `angle` (radians from +Z) within `range`. `point` is the contact point. |
 | `rayEnd(origin, angle, distance)` | `Vec2` | End point of a ray that hit nothing (for tracers). |
-| `separate(items, radiusOf, strength = 0.5)` | `void` | Soft crowd separation. Mutates positions. Overlapping pairs are pushed apart along the line between their centres, each item by `overlap * strength`. With `0.5`, a single pair is fully resolved in one pass. Cost is O(n²): fine for a few hundred items. Beyond that, use `SpatialHash` queries. Items at exactly the same position (distance < 1e-6) are pushed apart too, in a deterministic direction per pair. |
+| `separate(items, radiusOf, strength = 0.5)` | `void` | Soft crowd separation. Mutates positions. Overlapping pairs are pushed apart along the line between their centres, each item by `overlap * strength`. With `0.5`, a single pair is fully resolved in one pass. Cost is O(n²): fine for a few hundred items. Beyond that, use `separateWith`. Items at exactly the same position (distance < 1e-6) are pushed apart too, in a deterministic direction per pair. |
+| `separateWith(items, radiusOf, neighbours, strength = 0.5)` | `void` | The same, for crowds: each item is only checked against `neighbours(item)` — usually the engine's index, `e => ctx.near('enemies', e, radiusOf(e) + maxRadius)` — so it costs O(n·k). Items need string `id`s; each pair is resolved once. `games/starter` uses it for its waves. |
 | `clampToCircle(point, radius, margin = 0)` | `void` | Keeps a point inside a circle of `radius` **around the origin (0, 0)**. Pass the entity's own radius as `margin`. |
 | `keepOutOfCircle(point, center, radius)` | `void` | Pushes a point outside a circle (a central building, a pillar), onto its edge. A point exactly at the centre is pushed to +X. |
 | `clampToRect(point, rect, margin = 0)` | `void` | Keeps a point inside a rectangle, `margin` away from its edges. |

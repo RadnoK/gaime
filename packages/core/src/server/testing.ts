@@ -1,6 +1,7 @@
 import type { BaseWorld, PlayerOf } from '../shared/types';
 import type { GameContext, GameDefinition } from './game';
 import { Engine, type EngineHost } from './engine';
+import type { Recording } from './recorder';
 
 type Command = { type: string; [key: string]: unknown };
 type Recorded = {
@@ -63,8 +64,14 @@ export function testContext<W extends BaseWorld>(world: W, options: { random?: (
 }
 
 export interface TestGameOptions<W extends BaseWorld> {
-  /** Randomness for `ctx.random` — pass `seeded(n)`. Default Math.random. */
+  /** Seed of the world's random generator (`world.rng`, behind `ctx.random`): same seed, same game. */
+  seed?: number;
+  /** Replace `ctx.random` altogether (e.g. `seeded(n)`). Prefer `seed`: it also works with `record`. */
   random?: () => number;
+  /** Keep a flight recording (`t.recording()`) to test replays; `maxEntries` forces early segment rotation. */
+  record?: boolean | { maxEntries?: number };
+  /** Enforce module time budgets (wall-clock based, so off by default in tests). */
+  budget?: boolean;
   /** Start from this world instead of `createWorld()` (it is hydrated and migrated like a save). */
   world?: unknown;
   /**
@@ -87,8 +94,9 @@ export interface TestGameOptions<W extends BaseWorld> {
 export function testGame<W extends BaseWorld, I, S = GameContext<W>>(game: GameDefinition<W, I, S, any>, options: TestGameOptions<W> = {}) {
   const recorded: Recorded = { notices: [], events: [], triggered: [] };
   const jobs: Array<Promise<unknown>> = [];
-  const engine = new Engine<W, I>(game as GameDefinition<W, I>, recordingHost(options, recorded, jobs));
+  const engine = new Engine<W, I>(game as GameDefinition<W, I>, { ...recordingHost(options, recorded, jobs), budget: options.budget, record: options.record ? { minutes: game.record?.minutes ?? 60, maxEntries: typeof options.record === 'object' ? options.record.maxEntries : undefined } : undefined });
   if (options.world !== undefined) engine.world = engine.load(options.world);
+  if (options.seed !== undefined) engine.world.rng = options.seed >>> 0;
   trackJobs(engine.ctx, jobs);
   engine.prepare('TEST');
   const inputs: Record<string, I> = {};
@@ -124,10 +132,13 @@ export function testGame<W extends BaseWorld, I, S = GameContext<W>>(game: GameD
     input(id: string, input: I | undefined) { if (input === undefined) delete inputs[id]; else inputs[id] = input; },
     command(id: string, command: Command) { return engine.command(id, command); },
     chat(id: string, text: string) { return engine.command(id, { type: '$chat', text }); },
-    async request(id: string, name: string, payload?: unknown) {
-      const handler = game.requests?.[name];
-      if (!handler) throw new Error(`Unknown request "${name}".`);
-      return await engine.outside(() => handler(engine.world, id, payload, engine.ctx));
+    async request(id: string, name: string, payload?: unknown) { return await engine.request(id, name, payload); },
+    /** Operator command (`gaime admin <name> …`). */
+    admin(name: string, ...args: string[]) { return engine.admin(name, args); },
+    /** The flight recording so far (needs `record: true`) — feed it to `replay(game, recording)`. */
+    recording(reason = 'test'): Recording {
+      if (!engine.recorder) throw new Error('testGame: pass { record: true } to record.');
+      return engine.recorder.toJSON(game as GameDefinition<W, I>, 'TEST', reason);
     },
     /** Advance `count` ticks. */
     tick(count = 1) { for (let i = 0; i < count; i++) engine.step(inputs); },

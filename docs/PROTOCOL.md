@@ -10,7 +10,7 @@ WebSocket via Colyseus (MessagePack). Protocol version: `PROTOCOL_VERSION = 3` (
 | C→S | `input` | game input | continuous; `GameClient.input()` sends changes at most once per server tick (at most ~30/s; `tickRate` from `welcome`) and repeats the state every 150 ms; the server keeps the last input for 400 ms; validated by `parseInput` |
 | C→S | `command` | `{ type, ... }` | a discrete action → a module's `commands[type]` if one registered it, else `game.command`; types starting with `$` are engine commands (`$chat`, `$pause`, `$resume`) |
 | C→S | `request` | `{ id, name, payload }` | RPC → `game.requests[name]`, answered with `response` |
-| S→C | `welcome` | `{ id, game, version, protocol, revision, host, tickRate, world }` | full world projection + your player id; `tickRate` paces the client's input |
+| S→C | `welcome` | `{ id, game, version, protocol, revision, host, tickRate, room, world }` | full world projection + your player id; `tickRate` paces the client's input; `room` = `{ id, code? }` (the invite code of a private match) |
 | S→C | `patch` | `{ base, revision, values?, removed?, entities?, streams? }` | difference against `base`; a wrong `base` makes the client send `hello` |
 | S→C | `response` | `{ id, ok, result?, error? }` | |
 | S→C | `events` | `[[name, data], …]` | protocol 3+ clients: every client event of one server tick in one message, in order — `ctx.emit()` and bus events listed in `network.events`; never stored in the world (sounds, screen shake) |
@@ -20,7 +20,14 @@ WebSocket via Colyseus (MessagePack). Protocol version: `PROTOCOL_VERSION = 3` (
 
 ## Joining
 
-1. `GET /gaime/room` → `{ roomId }` of the one shared room.
+`GameClient` asks for a room and a seat in one request:
+
+1. `POST /gaime/room` with `{ ticket, name, protocol?, ephemeral?, room?, code?, create? }` → `{ roomId, code?, mode, size?, reservation }`. Shared games: the one room. Matches ([ROOMS.md](ROOMS.md#matchmaking)): back into `room` if it takes this ticket, else the private match `code`, else a new private match (`create: 'private'`), else public matchmaking. Errors: `400` bad ticket, `403` full / locked / no private matches, `404` unknown code, `503` + `Retry-After` while the game (re)starts.
+2. Colyseus `consumeSeatReservation(reservation)` connects to the room — to `reservation.publicAddress` when the room runs in another process ([ROOMS.md](ROOMS.md#scaling-out-with-redis)). The seat was reserved with the join options below.
+
+Tools and older clients use the two-step form:
+
+1. `GET /gaime/room` → `{ roomId, mode }` (shared), or `{ roomId, code?, mode: 'matches', size }` of an open room (`?code=ABCDE`: that private match; `?create=private`: a new one). No seat is held: the join can fail when the room fills up in between — ask again.
 2. Colyseus `joinById(roomId, options)` with `{ ticket, name, protocol?, ephemeral? }`:
    - `ticket` — the browser identity (random, kept in localStorage per game and `?player=` slot); `onAuth` maps it to a player id. Never sent to other clients.
    - `name` — the lobby nickname (trimmed, ≤ 24 characters, made unique: a taken name becomes `Name 2`, `Name 3`…; a returning player keeps their name if the requested one is taken, with a notice).
@@ -28,11 +35,11 @@ WebSocket via Colyseus (MessagePack). Protocol version: `PROTOCOL_VERSION = 3` (
    - `ephemeral: true` — a throwaway player (load-test bots): marked `data['gaime-ephemeral']` and removed from the world when it leaves.
 3. The server answers with `welcome`, then patches.
 
-Reconnects use Colyseus' reconnection token within `reconnectSeconds`; after that the client joins again with the same ticket and gets the same character (with `keepPlayers: true`). Server-controlled bots never connect — they are players flagged `data['gaime-bot']` and driven by `GameDefinition.bot`.
+Reconnects use Colyseus' reconnection token within `reconnectSeconds`; after that the client joins again with the same ticket and gets the same character (with `keepPlayers: true`) — in matches mode through `POST /gaime/room` with the remembered `room`. Server-controlled bots never connect — they are players flagged `data['gaime-bot']` and driven by `GameDefinition.bot`.
 
 Close codes: **4102** removed, **4103** the game was opened in another tab. (4000–4010 belong to Colyseus.)
 
-HTTP: `GET /health` → `{ ok, game, version, error, disabled?, uptime }` (the version of the code that is **loaded** — also after HMR — and modules switched off after an error), `GET /gaime/room` → `{ roomId }`, `GET /gaime/stats` → tick rate, tick/publish costs, patch sizes, event-loop delay, dropped simulated time, engine counters, the most expensive systems/handlers/commands (`parts`), memory, workers (reading it resets nothing). `/gaime/admin/*` — operator API (token).
+HTTP: `GET /health` → `{ ok, game, version, error, disabled?, uptime, rooms }` (the version of the code that is **loaded** — also after HMR — modules switched off after an error, rooms in this process), `GET`/`POST /gaime/room` (above), `GET /gaime/stats` → rooms and clients of this process, tick rate, tick/publish costs, patch sizes, event-loop delay, dropped simulated time, engine counters, the most expensive systems/handlers/commands (`parts`), memory, workers (reading it resets nothing). `/gaime/admin/*` — operator API (token; `?room=<id|code>` picks a room, `rooms` lists them).
 
 ## Client events
 

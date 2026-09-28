@@ -1,4 +1,5 @@
 // Game-agnostic end-to-end check with real WebSocket clients against a running game.
+// Shared games: one room. Matches mode (detected from /gaime/room): seats, invite codes, matchmaking.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { utimesSync, existsSync } from 'node:fs';
@@ -21,12 +22,24 @@ export async function smoke({ url = 'http://localhost:5173', hmr = false, cwd = 
   };
   const health = async () => (await fetch(`${url}/health`, { cache: 'no-store' })).json();
 
-  async function connect(name, id = ticket()) {
-    const { roomId } = await (await fetch(`${url}/gaime/room`)).json();
+  // Matches mode: a seat reservation from POST /gaime/room (what GameClient does); `match`: { code } | { create: 'private' } | { room }.
+  async function reserve(client, name, id, match) {
+    const response = await fetch(`${url}/gaime/room`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, ticket: id, ephemeral: true, ...match }) });
+    const answer = await response.json();
+    if (!response.ok) throw new Error(`POST /gaime/room: ${response.status} ${answer.error ?? ''}`);
+    return { answer, room: await client.consumeSeatReservation(answer.reservation) };
+  }
+
+  async function connect(name, id = ticket(), match) {
     const client = new Client(url);
-    const room = await client.joinById(roomId, { name, ticket: id, ephemeral: true });
+    let room, roomId, code;
+    if (match) ({ room, answer: { roomId, code } } = await reserve(client, name, id, match));
+    else {
+      ({ roomId } = await (await fetch(`${url}/gaime/room`)).json());
+      room = await client.joinById(roomId, { name, ticket: id, ephemeral: true });
+    }
     rooms.push(room);
-    const state = { id: '', world: null, welcomes: 0, reconnects: 0, left: null, client, ticket: id };
+    const state = { id: '', world: null, welcomes: 0, reconnects: 0, left: null, client, ticket: id, roomId, code };
     room.reconnection.minUptime = 0;
     room.onMessage('welcome', data => { state.id = data.id; state.world = data.world; state.revision = data.revision; state.welcomes++; });
     room.onMessage('patch', patch => { if (!applyPatch(state, patch)) room.send('hello'); });
@@ -59,8 +72,29 @@ export async function smoke({ url = 'http://localhost:5173', hmr = false, cwd = 
   try {
     const before = await health();
     assert.equal(before.ok, true, `health: ${JSON.stringify(before)}`);
-    const a = await connect('Smoke A');
-    const b = await connect('Smoke B');
+    const peek = await (await fetch(`${url}/gaime/room`, { cache: 'no-store' })).json();
+    const matches = peek.mode === 'matches';
+    const size = matches ? peek.size : Infinity;
+    if (matches) {
+      console.log(`matches mode: rooms of ${size}`);
+      if (size < 2) {
+        const solo = await connect('Smoke solo', ticket(), {});
+        assert(solo.state.world, 'welcome in a one-seat match');
+        console.log('✓ one-seat match: welcome snapshot (multi-client checks need rooms of 2+)');
+        console.log('PASS');
+        return;
+      }
+    }
+    // Matches: A and B meet in a private match (other players cannot take their seats).
+    const a = matches ? await connect('Smoke A', ticket(), { create: 'private' }) : await connect('Smoke A');
+    const b = matches ? await connect('Smoke B', ticket(), { code: a.state.code.toLowerCase() }) : await connect('Smoke B');
+    if (matches) {
+      assert.match(a.state.code ?? '', /^[A-Z0-9]{4,12}$/, 'a private match gets an invite code');
+      assert.equal(b.state.roomId, a.state.roomId, 'the invite code leads into the same room');
+      const byCode = await (await fetch(`${url}/gaime/room?code=${a.state.code}`)).json();
+      assert.equal(byCode.roomId, a.state.roomId, 'GET /gaime/room?code= finds the room');
+      console.log(`✓ private match ${a.state.code}: create + join by invite code`);
+    }
     await wait(() => a.state.world.players[b.state.id]?.online, 'A sees B online (entity patch)');
     console.log('✓ two clients, welcome snapshot and entity patches');
 
@@ -83,9 +117,31 @@ export async function smoke({ url = 'http://localhost:5173', hmr = false, cwd = 
     await wait(() => b.state.world.players[a.state.id]?.online === true, 'B sees A online again');
     console.log('✓ drop + reconnect keeps the identity');
 
-    const tab = await connect('Smoke A (new tab)', a.state.ticket);
-    assert.equal(tab.state.id, a.state.id, 'same ticket → same player');
+    if (!matches) {
+      const tab = await connect('Smoke A (new tab)', a.state.ticket);
+      assert.equal(tab.state.id, a.state.id, 'same ticket → same player');
+    } else {
+      // The room of A and B is full with 2 seats: take over a character in a room of its own.
+      const t = ticket();
+      const f = await connect('Smoke F', t, { create: 'private' });
+      const tab = await connect('Smoke F (new tab)', t, { code: f.state.code });
+      assert.equal(tab.state.id, f.state.id, 'same ticket → same player');
+    }
     console.log('✓ same browser identity takes over the character');
+
+    if (matches) {
+      const c = await connect('Smoke C', ticket(), {});
+      const d = await connect('Smoke D', ticket(), {});
+      assert.notEqual(c.state.roomId, a.state.roomId, 'public matchmaking never picks a private match');
+      if (c.state.roomId === d.state.roomId) {
+        console.log('✓ public matchmaking puts two players in the same room');
+        if (size === 2) {
+          const e = await connect('Smoke E', ticket(), {});
+          assert.notEqual(e.state.roomId, c.state.roomId, 'a full room takes nobody else');
+          console.log('✓ a third player gets a new room when the first one is full');
+        }
+      } else console.log('✓ public matchmaking (C and D landed in different rooms: other players took the free seat)');
+    }
 
     if (hmr) {
       const entry = resolve(cwd, 'src/server/index.ts');

@@ -1,5 +1,7 @@
 import { Room, ServerError, Protocol, getMessageBytes, type Client } from 'colyseus';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { BaseWorld, Welcome } from '../shared/types';
 import { CLOSE_REMOVED, CLOSE_REPLACED } from '../shared/types';
 import { JOIN_PROTOCOL, PROTOCOL_VERSION, type RequestMessage, type ResponseMessage } from '../shared/protocol';
@@ -8,11 +10,13 @@ import { findPlayer, pushFeed } from '../shared/world';
 import type { GameDefinition } from './game';
 import { cleanName, Engine } from './engine';
 import { readCheckpoint, saveCheckpoint } from './persistence';
-import { clearError, markError, runtime, setRoom } from './runtime';
-import { recordClients, recordDropped, recordEngine, recordPart, recordPublish, recordTick, recordTickRate } from './metrics';
+import { clearError, CREATE_KEY, createSecret, dataDir, markError, runtime, setRoom } from './runtime';
+import { normalizeCode, type RoomMetadata } from './matchmaking';
+import { recordClients, recordDropped, recordEngine, recordPart, recordPublish, recordThrottle, recordTick, recordTickRate } from './metrics';
 
-type Cache<W> = { world: W; identities: Record<string, string>; sessions: Record<string, string>; batched?: string[] };
+type Cache<W> = { world: W; identities: Record<string, string>; sessions: Record<string, string>; batched?: string[]; locked?: boolean };
 type Command = { type: string; [key: string]: unknown };
+type CreateOptions = { [CREATE_KEY]?: unknown; private?: unknown; code?: unknown };
 
 const TICKET = /^[A-Za-z0-9_-]{16,64}$/;
 const SAVE_EVERY_MS = 2000;
@@ -26,10 +30,25 @@ const MAX_EVENTS_PER_CLIENT = 256;
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
+/** Saved flight recordings of every room in this data directory, newest last. */
+export function listRecordings() {
+  try { return readdirSync(join(dataDir(), 'replays')).filter(name => name.endsWith('.json')).sort().map(name => join(dataDir(), 'replays', name)); }
+  catch { return []; }
+}
+/** Matches mode: a room with no connection and no pending seat closes after this long. */
+const emptyRoomMs = () => {
+  const seconds = Number(process.env.GAIME_EMPTY_ROOM_SECONDS || 30);
+  return 1000 * (Number.isFinite(seconds) ? Math.max(0, seconds) : 30);
+};
+
 /**
- * Builds the single shared room of a game: the network side of the `Engine` — identities,
+ * Builds the room class of a game: the network side of the `Engine` — identities,
  * sessions, reconnection, input leases, the fixed-step clock, delta publishing, batched
  * client events, checkpoints and hot-reload cache/restore.
+ *
+ * `rooms: shared` (default): one persistent room with a checkpoint. `rooms: matches`: many rooms of
+ * `size` seats (Colyseus `maxClients`), ephemeral worlds, optional invite codes, `ctx.lockRoom`,
+ * closed when empty for a while (docs/ROOMS.md).
  */
 export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, I>) {
   const net = resolveNetwork(game.network);
@@ -40,6 +59,8 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
   const inputLeaseMs = game.inputLeaseMs ?? 400;
   const keepPlayers = game.keepPlayers ?? true;
   const maxPlayers = game.maxPlayers ?? Infinity;
+  const matches = game.rooms?.mode === 'matches' ? game.rooms : undefined;
+  const size = matches ? Math.max(1, Math.floor(matches.size) || 1) : Infinity;
   // The catalog and other shared values are rebuilt by `prepare`; never store them.
   const omit = [...net.shared];
 
@@ -65,6 +86,16 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
     publishSoon = false;
     shuttingDown = false;
     game = game;
+    /** Matches mode: invite code of a private room. */
+    code?: string;
+    /** Matches mode: `ctx.lockRoom(true)`. */
+    closed = false;
+    /** Matches mode: since when the room has no connection and no pending seat. */
+    emptySince = 0;
+    /** Matches mode: the listing metadata last written to the driver. */
+    listed = '';
+
+    lastRecordingSave = 0;
 
     get world(): W { return this.engine.world; }
     set world(world: W) { this.engine.world = world; }
@@ -73,7 +104,6 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
 
     createEngine(): Engine<W, I> {
       const room = this;
-      runtime().disabled = {};
       return new Engine<W, I>(game, {
         notify: (playerId, text) => { for (const client of room.clients) if (room.sessions[client.sessionId] === playerId) client.send('notice', text); },
         send: (name, data, playerId) => {
@@ -83,24 +113,34 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
           room.outbox.to.set(playerId, list);
         },
         disconnect: playerId => room.closePlayer(playerId),
-        failed: error => { markError(error); room.publishSoon = true; },
-        resumed: () => clearError(),
-        disabled: (owner, error) => { runtime().disabled[owner] = message(error); room.publishSoon = true; },
+        failed: error => { markError(error, room.roomId); room.publishSoon = true; room.saveRecording('error', true); },
+        resumed: () => clearError(room.roomId),
+        disabled: (owner, error) => { runtime().disabled[owner] = message(error); room.publishSoon = true; room.saveRecording(`module-${owner}`, true); },
+        budget: true,
+        throttled: (owner, factor) => recordThrottle(owner, factor),
+        record: { minutes: game.record?.minutes ?? 10 },
         changed: () => { room.dirty = true; room.publishSoon = true; },
         profile: recordPart,
+        get room() { return room.info(); },
+        lockRoom: locked => room.setLocked(locked),
       });
     }
 
-    onCreate() {
+    onCreate(options: CreateOptions = {}) {
+      // Rooms come from /gaime/room only — never from Colyseus' public `/matchmake/create` route.
+      if (options[CREATE_KEY] !== createSecret()) throw new ServerError(403, 'Rooms are created by the game server (/gaime/room).');
       this.autoDispose = false;
       this.maxMessagesPerSecond = game.maxMessagesPerSecond ?? 90;
+      if (matches) this.setupMatch(options);
       setRoom(this);
       recordTickRate(tickRate);
-      try {
-        const saved = readCheckpoint<W>(game.name);
-        if (saved) { this.world = this.engine.load(saved.world); this.identities = saved.identities; }
-      } catch (error) {
-        this.freeze(error);
+      if (!matches) {
+        try {
+          const saved = readCheckpoint<W>(game.name);
+          if (saved) { this.world = this.engine.load(saved.world); this.identities = saved.identities; }
+        } catch (error) {
+          this.freeze(error);
+        }
       }
       for (const player of Object.values(this.world.players)) player.online = false;
       // Test bots (join option `ephemeral`) never outlive their connection.
@@ -140,9 +180,8 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       const id = this.sessions[client.sessionId];
       if (!id || !message || !Number.isInteger(message.id) || typeof message.name !== 'string') return;
       const reply = (response: Omit<ResponseMessage, 'id'>) => client.send('response', { id: message.id, ...response } satisfies ResponseMessage);
-      const handler = game.requests?.[message.name];
-      if (!handler) { reply({ ok: false, error: `Unknown request "${message.name}".` }); return; }
-      try { reply({ ok: true, result: await this.engine.outside(() => handler(this.world, id, message.payload, this.ctx)) }); }
+      if (!game.requests?.[message.name]) { reply({ ok: false, error: `Unknown request "${message.name}".` }); return; }
+      try { reply({ ok: true, result: await this.engine.request(id, message.name, message.payload) }); }
       catch (error) { console.error(`[gaime] request ${message.name}`, error); reply({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     }
 
@@ -162,11 +201,13 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       for (let i = 0; i < steps; i++) this.engine.step(this.playerInputs);
       this.flushEvents();
       recordTick(performance.now() - started);
-      recordClients(this.clients.length);
+      // Matches mode: /gaime/stats adds up the clients of every room itself.
+      if (!matches) recordClients(this.clients.length);
       const counters = this.engine.counters;
       recordEngine({ ...counters, timersPending: this.world.schedule?.size ?? 0, droppedEvents: this.droppedEvents });
       if (++this.ticks % publishEvery === 0 || this.publishSoon) this.publish();
       if (now - this.lastSave > SAVE_EVERY_MS && (this.dirty || this.world.time !== this.savedTime)) this.persist();
+      if (matches && this.ticks % tickRate === 0) this.housekeeping(now);
     }
 
     /** One message per client per tick with every event of the tick (older clients: one message per event). */
@@ -191,7 +232,63 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       this.engine.frozen = message(error);
       this.world.pause = { reason: 'error', message: this.engine.frozen };
       pushFeed(this.world, `⚠ The save could not be loaded: ${this.engine.frozen}. The file on disk is left untouched.`);
-      markError(error);
+      markError(error, this.roomId);
+    }
+
+    // ── matches ───────────────────────────────────────────────────────
+
+    /** `size` seats, an optional invite code, listing metadata — before the room is listed. */
+    setupMatch(options: CreateOptions) {
+      this.maxClients = size;
+      if (options.private === true) {
+        const code = normalizeCode(options.code);
+        if (!code) throw new ServerError(400, 'A private match needs an invite code.');
+        this.code = code;
+        void this.setPrivate(true, false);
+      }
+      this.listed = JSON.stringify(this.listing());
+      void this.setMetadata(this.listing(), false);
+    }
+
+    /** What the matchmaker and `gaime rooms` see (kept in the Colyseus listing). */
+    listing(): RoomMetadata {
+      let players = 0;
+      for (const player of Object.values(this.world.players)) if (!player.data[BOT]) players++;
+      return { ...(this.code ? { code: this.code } : {}), locked: this.closed, players };
+    }
+
+    info(): { id: string; code?: string } {
+      return this.code ? { id: this.roomId, code: this.code } : { id: this.roomId ?? 'local' };
+    }
+
+    /** Once a second: refresh the listing; close the room when it has stayed empty for a while. */
+    housekeeping(now: number) {
+      const listing = this.listing();
+      const text = JSON.stringify(listing);
+      if (text !== this.listed) { this.listed = text; void this.setMetadata(listing); }
+      // Seats held for reconnecting players or not yet used keep the room open.
+      const pending = Object.keys((this as unknown as { _reservedSeats: object })._reservedSeats).length;
+      if (this.clients.length || pending) { this.emptySince = 0; return; }
+      this.emptySince ||= now;
+      if (now - this.emptySince >= emptyRoomMs() && !this.shuttingDown) void this.disconnect();
+    }
+
+    /** `ctx.lockRoom`: a locked room gets no new players from matchmaking or by code; returning players still get in. */
+    setLocked(locked: boolean) {
+      if (!matches) { console.warn('[gaime] ctx.lockRoom only works with rooms: { mode: "matches" }.'); return; }
+      if (this.closed === locked) return;
+      this.closed = locked;
+      if (locked) void this.lock();
+      // A full room stays locked by Colyseus until a seat frees up.
+      else if (this.hasReachedMaxClients()) (this as unknown as { _lockedExplicitly: boolean })._lockedExplicitly = false;
+      else void this.unlock();
+      this.listed = JSON.stringify(this.listing());
+      void this.setMetadata(this.listing());
+    }
+
+    /** Whether this browser ticket already has a character here (called by the matchmaker, maybe from another process). */
+    knows(ticket: string): boolean {
+      return typeof ticket === 'string' && !!this.identities[ticket] && !!this.world.players[this.identities[ticket]];
     }
 
     // ── admin (gaime CLI) ─────────────────────────────────────────────
@@ -206,22 +303,23 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
           everything.hidden.clear();
           return projectWorld(this.world, everything);
         }
-        case 'say': pushFeed(this.world, `📣 ${String(args.text ?? '').slice(0, 280)}`); this.publishSoon = true; return { ok: true };
+        case 'say': this.engine.say(String(args.text ?? '')); this.publishSoon = true; return { ok: true };
         case 'kick': {
           const target = findPlayer(this.world.players, String(args.player ?? ''));
           if (!target) throw new Error(`No player named "${args.player}".`);
           this.ctx.removePlayer(target.id); this.persist(); return { removed: target.name };
         }
-        case 'pause': this.world.pause = { reason: 'host' }; return { paused: true };
-        case 'resume': if (this.frozen) throw new Error('The save did not load — fix the code first.'); this.world.pause = null; clearError(); return { paused: false };
-        case 'save': this.persist(); return { saved: true };
-        case 'command': {
-          const name = String(args.name ?? '');
-          const command = game.admin?.[name];
-          if (!command) throw new Error(`Unknown admin command "${name}". Available: ${Object.keys(game.admin ?? {}).join(', ') || 'none'}`);
-          const result = this.engine.outside(() => command.run(this.world, Array.isArray(args.args) ? args.args.map(String) : [], this.ctx));
-          return result ?? { ok: true };
+        case 'pause': this.engine.setPause({ reason: 'host' }); return { paused: true };
+        case 'resume': if (this.frozen) throw new Error('The save did not load — fix the code first.'); this.engine.setPause(null); clearError(this.roomId); return { paused: false };
+        case 'save': this.persist(); return { saved: !matches };
+        case 'room': return { ...this.info(), clients: this.clients.length, locked: this.closed, private: !!this.code, mode: matches ? 'matches' : 'shared' };
+        case 'command': return this.engine.admin(String(args.name ?? ''), Array.isArray(args.args) ? args.args.map(String) : []) ?? { ok: true };
+        case 'replay': {
+          const file = this.saveRecording(String(args.reason ?? 'manual'));
+          if (!file) throw new Error('This game does not record (GameDefinition.record.enabled is false).');
+          return { file };
         }
+        case 'replays': return listRecordings();
         case 'commands': return Object.fromEntries(Object.entries(game.admin ?? {}).map(([name, command]) => [name, command.description]));
         default: throw new Error(`Unknown action ${action}.`);
       }
@@ -234,7 +332,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       if (!id) return;
       const snapshot = { world: this.viewFor(projectWorld(this.world, net), id), revision: ++this.revision };
       this.snapshots.set(client.sessionId, snapshot);
-      client.send('welcome', { id, game: game.name, version: runtime().loaded, protocol: PROTOCOL_VERSION, revision: snapshot.revision, host: this.world.hostId === id, tickRate, world: snapshot.world } satisfies Welcome & { world: W });
+      client.send('welcome', { id, game: game.name, version: runtime().loaded, protocol: PROTOCOL_VERSION, revision: snapshot.revision, host: this.world.hostId === id, tickRate, room: this.info(), world: snapshot.world } satisfies Welcome & { room: { id: string; code?: string }; world: W });
     }
 
     /** `GameDefinition.view` applied to a projection (never to the authoritative world). */
@@ -246,7 +344,6 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
 
     publish() {
       this.publishSoon = false;
-      this.engine.ensureHost();
       const started = performance.now();
       let largest = 0;
       let snapshot: WorldSnapshot<W> | undefined;
@@ -294,6 +391,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       if (typeof ticket !== 'string' || !TICKET.test(ticket)) throw new ServerError(400, 'Missing player ticket.');
       const id = this.identities[ticket];
       const existing = id ? this.world.players[id] : undefined;
+      if (this.closed && !existing) throw new ServerError(403, 'This match has already started.');
       const players = Object.values(this.world.players).filter(p => !p.data[BOT]);
       const taken = keepPlayers ? players.filter(p => p.online && p.id !== id).length : players.filter(p => p.id !== id).length;
       if ((!existing || keepPlayers) && taken >= maxPlayers) throw new ServerError(403, `The game is full (at most ${maxPlayers} players).`);
@@ -305,14 +403,14 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       let id = this.identities[auth.ticket];
       if (!id || !this.world.players[id]) {
         id = randomUUID();
-        const player = this.engine.addPlayer(id, name);
+        const ephemeral = options?.ephemeral === true;
+        const player = this.engine.addPlayer(id, name, ephemeral ? { [EPHEMERAL]: true } : undefined);
         this.identities[auth.ticket] = id;
-        if (options?.ephemeral === true) player.data[EPHEMERAL] = true;
-        else pushFeed(this.world, `${player.name} joined the game.`);
+        if (!ephemeral) pushFeed(this.world, `${player.name} joined the game.`);
       } else if (name && name !== this.world.players[id].name) {
         // Same rule as /nick; a taken name keeps the current one.
         if (this.engine.nameTaken(id, name)) client.send('notice', `The nickname "${name}" is taken — you keep "${this.world.players[id].name}".`);
-        else this.world.players[id].name = name;
+        else this.engine.setName(id, name);
       }
       if (Number(options?.[JOIN_PROTOCOL]) >= 3) this.batched.add(client.sessionId);
       // The same browser identity opened in another tab takes over the character.
@@ -388,18 +486,40 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
 
     // ── persistence & hot reload ──────────────────────────────────────
 
+    /** Shared mode: the checkpoint. Worlds of matches are ephemeral (hot reloads keep them in memory). */
     persist() {
-      if (this.frozen) return;
+      if (this.frozen || matches) return;
       try {
         saveCheckpoint(game.name, this.world, this.identities, omit);
         this.savedTime = this.world.time; this.dirty = false; this.lastSave = Date.now();
       } catch (error) { console.error('[gaime] checkpoint', error); }
     }
 
+    /**
+     * Writes the flight recording to `<data>/replays/`. Automatic saves (errors, a module switched
+     * off) happen at most once a minute per room; the newest 20 files are kept.
+     */
+    saveRecording(reason: string, automatic = false): string | undefined {
+      const recorder = this.engine.recorder;
+      if (!recorder || (automatic && Date.now() - this.lastRecordingSave < 60_000)) return undefined;
+      this.lastRecordingSave = Date.now();
+      try {
+        const dir = join(dataDir(), 'replays');
+        mkdirSync(dir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const file = join(dir, `${stamp}-${matches ? `${this.roomId}-` : ''}${reason.replace(/[^\w-]+/g, '-').slice(0, 40)}.json`);
+        writeFileSync(file, JSON.stringify(recorder.toJSON(game, runtime().loaded, reason)));
+        for (const old of readdirSync(dir).filter(name => name.endsWith('.json')).sort().slice(0, -20)) rmSync(join(dir, old), { force: true });
+        if (automatic) console.log(`[gaime] replay saved: ${file}`);
+        return file;
+      } catch (error) { console.error('[gaime] replay', error); return undefined; }
+    }
+
     onCacheRoom(): Cache<W> {
       this.shuttingDown = true;
       this.persist();
-      return { world: this.world, identities: this.identities, sessions: this.sessions, batched: [...this.batched] };
+      this.engine.dispose();
+      return { world: this.world, identities: this.identities, sessions: this.sessions, batched: [...this.batched], locked: this.closed };
     }
 
     onRestoreRoom(cache?: Cache<W>) {
@@ -411,7 +531,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       try {
         this.world = this.engine.load(cache.world);
         this.engine.frozen = null;
-        clearError();
+        clearError(this.roomId);
         pushFeed(this.world, `♻ New game code loaded (${runtime().loaded.slice(0, 8)}).`);
       } catch (error) {
         // Keep the real state visible and untouched; the previous code can still read it.
@@ -420,6 +540,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
       }
       for (const player of Object.values(this.world.players)) player.online = false;
       this.engine.prepare(runtime().loaded);
+      if (cache.locked) this.setLocked(true);
     }
 
     onBeforeShutdown() {
@@ -430,6 +551,7 @@ export function createRoomClass<W extends BaseWorld, I>(game: GameDefinition<W, 
 
     onDispose() {
       this.persist();
+      this.engine.dispose();
       setRoom(undefined, this);
     }
   };

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { seeded } from '../src/shared';
 import {
-  SpatialHash, raycast, rayCircle, separate, clampToCircle, keepOutOfCircle, circleRect,
+  SpatialHash, raycast, rayCircle, separate, separateWith, clampToCircle, keepOutOfCircle, circleRect,
   launch, stepProjectiles, wasHit, ballisticAngle, type Projectile,
   cooldown, every, schedule, due, status,
   createMatch, setReady, stepMatch, endMatch, toLobby, matchTimeLeft,
@@ -38,6 +38,24 @@ describe('spatial and collision', () => {
     const p = { x: 20, z: 0 }; clampToCircle(p, 10, 1); expect(p.x).toBeCloseTo(9);
     const q = { x: 0.1, z: 0 }; keepOutOfCircle(q, { x: 0, z: 0 }, 2); expect(q.x).toBeCloseTo(2);
     expect(circleRect({ x: -1, z: 5 }, 1.1, { x: 0, z: 0, width: 10, depth: 10 })).toBe(true);
+  });
+
+  test('separateWith relaxes a crowd like separate, from a neighbour query', () => {
+    const make = () => Array.from({ length: 60 }, (_, i) => ({ id: `e${String(i).padStart(2, '0')}`, x: (i % 8) * 0.6, z: Math.floor(i / 8) * 0.6 }));
+    const all = make(); const indexed = make();
+    separate(all, () => 0.5);
+    const grid = new SpatialHash<(typeof indexed)[number]>(2);
+    grid.rebuild(indexed);
+    const overlap = (items: Array<{ x: number; z: number }>) => {
+      let total = 0;
+      for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) total += Math.max(0, 1 - Math.hypot(items[i].x - items[j].x, items[i].z - items[j].z));
+      return total;
+    };
+    const before = overlap(make());
+    separateWith(indexed, () => 0.5, item => grid.query(item, 1.5));
+    // Pair order differs from `separate`, so positions differ slightly; the crowd relaxes just as much.
+    expect(overlap(indexed)).toBeLessThan(before * 0.75);
+    expect(overlap(indexed)).toBeLessThan(overlap(all) * 1.5);
   });
 
   test('separate pushes apart items at exactly the same position, deterministically', () => {

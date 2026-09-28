@@ -43,6 +43,8 @@ services:
       GAIME_SERVER_ENTRY: ${GAIME_SERVER_ENTRY:-}
       GAIME_LATENCY_MS: ${GAIME_LATENCY_MS:-}
       GAIME_ADMIN_TOKEN: ${GAIME_ADMIN_TOKEN:-}
+      GAIME_EMPTY_ROOM_SECONDS: ${GAIME_EMPTY_ROOM_SECONDS:-}
+      GAIME_MAX_ROOMS: ${GAIME_MAX_ROOMS:-}
       GIT_SSH_COMMAND: >-
         ssh -i /run/git-ssh/deploy-key
         -o UserKnownHostsFile=/run/git-ssh/known_hosts

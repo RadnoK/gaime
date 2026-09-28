@@ -19,11 +19,10 @@ Faster loops: `npx vitest run games/<game>`, `npx tsc --noEmit -p games/<game>`.
 `games/<game>/tests/*.test.ts` with **`testGame`** — the same `Engine` the server runs (fixed-step clock, timers, events, systems, modifiers, module handlers and commands, bots, jobs), driven by the test:
 
 ```ts
-import { seeded } from '@gaime/core';
 import { testGame } from '@gaime/core/server';
 import { game } from '../src/server/game';
 
-const setup = () => testGame(game, { random: seeded(1) });
+const setup = () => testGame(game, { seed: 1 });
 
 test('collecting a pickup scores', () => {
   const t = setup();
@@ -39,9 +38,34 @@ test('collecting a pickup scores', () => {
 - Drive: `t.join`, `t.leave`, `t.remove`, `t.addBot()`, `t.input`, `t.tick`, `t.run(seconds, until?)`, `t.command`, `t.chat`, `t.request`, `await t.flushJobs()`; run `Sim` helpers like a system would with `t.act(sim => sim.spawnPickup('coin', t.player(ada)))` (its events are handled right after); `t.sim()` is for reading.
 - **Strict by default**: an exception in a module or in game code throws out of `t.tick`/`t.run`/`t.command`, so a broken module fails the test. `testGame(game, { strict: false })` tests isolation itself: `t.disabled`, `t.world.pause`.
 - Saves: `testGame(game, { world: oldShapedWorld })` hydrates and migrates it like a checkpoint.
-- Always seed randomness.
+- Always seed randomness: `{ seed: n }` seeds the world's generator (`world.rng`) and keeps the run replayable; `{ random: seeded(n) }` also works but cannot be replayed.
 - Test: a full round/wave (`t.run(seconds, () => done)`), events and timers (`triggeredOf`, `timeLeft`), commands refusing invalid use (not host, not your turn, no ammo), every module loads (`registry.lists.<kind>.length`) and does what it promises, removed modules are cleaned by `prepareWorld`, old saves load.
 - Games with a `bot` brain: `t.addBot(); t.addBot(); t.run(600, () => someoneWon(t.world))` — an excellent end-to-end rule test.
+- `t.admin(name, ...args)` runs an operator command; `testGame(game, { budget: true })` turns module time budgets on (off by default — they measure wall-clock time).
+
+## Determinism: record and replay
+
+Every game keeps one test that records a session and replays it — it catches `Math.random()`, `Date.now()` and module-level state the day they are introduced, and it proves live recordings (`gaime replay`) will be usable:
+
+```ts
+import { replay, testGame } from '@gaime/core/server';
+
+test('a recorded session replays exactly', () => {
+  const t = testGame(game, { seed: 5, record: true });
+  const ada = t.join('Ada'); t.addBot();
+  for (let s = 0; s < 30; s++) { t.input(ada, { mx: Math.sin(s), mz: 0 }); t.run(1); }   // Math.sin is fine: it is the test's input
+  t.command(ada, { type: 'start' });                                          // a command of your game
+  const result = replay(game, JSON.parse(JSON.stringify(t.recording())));   // a JSON round trip, like a saved file
+  expect(result.diverged).toBeUndefined();
+  expect(result.verified).toBeGreaterThan(0);
+  expect(JSON.stringify(result.world)).toBe(JSON.stringify(t.world));
+});
+```
+
+- Drive the recorded run only through `join`, `input`, `command`, `chat`, `request`, `admin`, `addBot`, `leave`, `remove` — `t.act(...)` runs outside the recorder and marks the recording incomplete.
+- To test that a replay can start mid-game (the oldest segments dropped), shorten the window: `testGame({ ...game, record: { minutes: 0.05 } }, { seed, record: true })` — see `games/bumper/tests`.
+- A failing replay: `result.diverged.tick` is the first check (every 150 ticks) that differs — bisect with `replay(game, recording, { onTick })`; causes in `docs/TROUBLESHOOTING.md#a-replay-diverges`.
+- A recording saved by the server (`npx gaime replay`, or automatically after an error) replays the same way — make it a regression test once the bug is fixed.
 
 `testContext(world, { random, command })` is for unit tests of single functions without a game: it returns `ctx`, `notices`, `events`, `triggered` (bus events are recorded, no handlers run), `advance(seconds)` (fires due timers into `triggered`), `removed`, `flushJobs()`. Anything involving handlers, systems or modules belongs in `testGame`.
 
@@ -66,7 +90,7 @@ Read `rttMs`, `perBot`, `server.tickMsMax` (< 33), `publishMsMax`, `patchBytesMa
 
 ## Framework tests
 
-`packages/core/tests` (the engine in `engine.test.ts`, delta sync, registry, kit, workers, a real server with WebSocket clients) and `packages/host/tests` (tree sync, dependency linking, commit filter). When changing the framework, run everything and add a test next to the code you changed.
+`packages/core/tests` (the engine in `engine.test.ts`, recordings and replays in `determinism.test.ts`, rooms and matchmaking in `rooms.test.ts`, delta sync, registry, kit, workers, a real server with WebSocket clients) and `packages/host/tests` (tree sync, dependency linking, commit filter). When changing the framework, run everything and add a test next to the code you changed.
 
 ## Debugging tips
 
@@ -77,4 +101,4 @@ Read `rttMs`, `perBot`, `server.tickMsMax` (< 33), `publishMsMax`, `patchBytesMa
 
 ## Reference
 
-`docs/TESTING.md`, `docs/reference/CLI.md` (smoke, load).
+`docs/TESTING.md`, `docs/SIMULATION.md#determinism-and-replays`, `docs/reference/CONFIG.md#testgame-and-replay`, `docs/reference/CLI.md` (smoke, load, replay).

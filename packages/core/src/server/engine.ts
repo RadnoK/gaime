@@ -1,11 +1,13 @@
-import type { BasePlayer, BaseWorld, PlayerOf } from '../shared/types';
+import type { BasePlayer, BaseWorld, Data, Pause, PlayerOf } from '../shared/types';
 import { findPlayer, hydrate, nextId, pushFeed } from '../shared/world';
+import { mulberry } from '../shared/math';
 import { resolveNetwork } from '../shared/net';
 import { collectBehaviour, type CommandHandler, type EventHandler, type Modifier, type Owned, type SystemDef, type SystemPhase } from '../shared/registry';
 import { addTimer, cancelTimer, cancelTimers, countTimers, createSchedule, takeDue, timerLeft } from '../shared/schedule';
 import { SpatialHash } from '../kit/spatial';
-import type { GameContext, GameDefinition } from './game';
+import type { GameContext, GameDefinition, ResourceOptions } from './game';
 import { createChat } from './chat';
+import { Recorder, type EngineState } from './recorder';
 
 /** What the engine needs from its surroundings: the network room, or a test harness. */
 export interface EngineHost {
@@ -34,10 +36,18 @@ export interface EngineHost {
   random?: () => number;
   /** Throw module errors instead of disabling the module (tests). */
   strict?: boolean;
+  /** Enforce `GameDefinition.budget` (measures wall-clock time: off in tests and replays). */
+  budget?: boolean;
+  /** A module's systems were throttled (factor 2, 4, 8) or recovered (1). */
+  throttled?(owner: string, factor: number, msPerTick: number): void;
+  /** Keep a flight recording of the last `minutes` (see recorder.ts). */
+  record?: { minutes: number; maxEntries?: number };
+  /** Replaying a recording: no recording, no budget, jobs and throttling come from the entries. */
+  replaying?: boolean;
 }
 
 type Command = { type: string; [key: string]: unknown };
-type Job<W extends BaseWorld> = { apply: (world: W, result: unknown, ctx: GameContext<W>) => void; fail?: (world: W, error: Error, ctx: GameContext<W>) => void; result?: unknown; error?: Error };
+type Job<W extends BaseWorld> = { n: number; apply: (world: W, result: unknown, ctx: GameContext<W>) => void; fail?: (world: W, error: Error, ctx: GameContext<W>) => void; result?: unknown; error?: Error };
 type RunningSystem = { owner: string; def: SystemDef; name: string; next: number; last: number };
 type Positioned = { id?: string; x: number; z: number };
 type Index = { hash: SpatialHash<Positioned>; tick: number; margin: number; maxRadius: number };
@@ -92,8 +102,19 @@ export class Engine<W extends BaseWorld, I = unknown> {
   private depth = 0;
   private eventsThisTick = 0;
   private sim: { key: string; value: unknown } | undefined;
-  private readonly resources = new Map<string, { value: unknown; dispose?: (value: any) => void }>();
+  private readonly resources = new Map<string, { value: unknown; options: ResourceOptions<any> }>();
+  /** Resource state from a recording, waiting for the code to ask for that resource (replays). */
+  private readonly savedResources = new Map<string, unknown>();
   private readonly indexes = new Map<string, Index>();
+  /** Budget: throttle factor per module, time spent per module since the last review. */
+  readonly throttle: Record<string, number> = {};
+  private readonly spent = new Map<string, number>();
+  private budgetTicks = 0;
+  private readonly budgetMs: number;
+  /** Jobs are numbered in creation order (deterministic), so a replay can match their results. */
+  private jobSeq = 0;
+  private readonly replayJobs = new Map<number, Job<W>>();
+  readonly recorder?: Recorder<W>;
 
   constructor(readonly game: GameDefinition<W, I>, readonly host: EngineHost, world?: W) {
     this.world = world ?? game.createWorld();
@@ -122,12 +143,17 @@ export class Engine<W extends BaseWorld, I = unknown> {
       if (this.commands[type]) throw new Error(`Module ${command.owner}: command "${type}" is already handled by the game.`);
       this.commands[type] = command;
     }
+    const budget = game.budget ?? {};
+    this.budgetMs = host.budget && !host.replaying && budget.enabled !== false ? budget.moduleMs ?? (1000 * this.dt) * 0.2 : 0;
+    if (host.record && !host.replaying && game.record?.enabled !== false) this.recorder = new Recorder(this, host.record.minutes, host.record.maxEntries);
     this.ctx = this.context();
     this.chatHandler = createChat(game as GameDefinition<W, unknown>, {
       ctx: this.ctx,
       bots: !!game.bot,
       rename: (id, name) => this.rename(id, name),
       pause: (id, paused) => this.command(id, { type: paused ? '$pause' : '$resume' }),
+      // A replay runs faster than real time: the chat flood limit would reject recorded messages.
+      unlimited: !!host.replaying,
     });
   }
 
@@ -135,9 +161,11 @@ export class Engine<W extends BaseWorld, I = unknown> {
 
   /** Advance one fixed tick. `inputs` are the humans' current inputs; bots are added here. */
   step(inputs: Readonly<Record<string, I>> = {}) {
+    this.recorder?.inputs(inputs);
     this.applyJobs();
     const world = this.world;
     if (world.pause) return;
+    if (this.budgetMs) this.review();
     let all = inputs;
     if (this.game.bot) {
       const bots: Record<string, I> = {};
@@ -164,33 +192,72 @@ export class Engine<W extends BaseWorld, I = unknown> {
     }
     this.runSystems('update');
     this.runSystems('late');
+    this.ensureHost();
+    this.recorder?.afterStep();
   }
 
   private runSystems(phase: SystemPhase) {
     for (const system of this.systems[phase]) {
       if (this.world.pause) return;
       if (this.disabledModules[system.owner]) continue;
+      // A module over its time budget runs its systems only every `factor`-th tick (staggered).
+      const factor = this.throttle[system.owner];
+      if (factor > 1 && (this.world.tick + Math.floor(fraction(system.name) * factor)) % factor !== 0) continue;
       const every = system.def.every;
-      let dt = this.dt;
+      let dt = factor > 1 ? this.world.time - system.last : this.dt;
       if (every) {
         if (this.world.time < system.next) continue;
         dt = this.world.time - system.last;
-        system.last = this.world.time;
         system.next = system.next + every > this.world.time ? system.next + every : this.world.time + every;
       }
+      system.last = this.world.time;
       const started = performance.now();
       this.unit(() => this.isolate(system.owner, () => system.def.run(this.simFor(dt), dt)));
-      this.host.profile?.(system.name, performance.now() - started);
+      const ms = performance.now() - started;
+      this.host.profile?.(system.name, ms);
+      this.charge(system.owner, ms);
     }
   }
 
   /** Periodic systems start staggered from the current world time (after construction and every load). */
   private alignSystems() {
-    for (const system of [...this.systems.input, ...this.systems.update, ...this.systems.late]) {
+    for (const system of this.allSystems()) {
       const every = system.def.every ?? 0;
       system.next = this.world.time + fraction(system.name) * every;
-      system.last = system.next - every;
+      system.last = every ? system.next - every : this.world.time - this.dt;
     }
+  }
+
+  private allSystems() { return [...this.systems.input, ...this.systems.update, ...this.systems.late]; }
+
+  // ── budget ────────────────────────────────────────────────────────
+
+  private charge(owner: string, ms: number) {
+    if (this.budgetMs && owner !== 'game') this.spent.set(owner, (this.spent.get(owner) ?? 0) + ms);
+  }
+
+  /** Once a second: throttle modules over budget (×2 up to ×8), relax the ones well under it. */
+  private review() {
+    if (++this.budgetTicks < Math.round(1 / this.dt)) return;
+    const ticks = this.budgetTicks;
+    this.budgetTicks = 0;
+    for (const owner of new Set([...this.spent.keys(), ...Object.keys(this.throttle)])) {
+      const perTick = (this.spent.get(owner) ?? 0) / ticks;
+      const factor = this.throttle[owner] ?? 1;
+      if (perTick > this.budgetMs && factor < 8) this.setThrottle(owner, factor * 2, perTick);
+      else if (factor > 1 && perTick * factor < this.budgetMs / 2) this.setThrottle(owner, factor / 2, perTick);
+    }
+    this.spent.clear();
+  }
+
+  setThrottle(owner: string, factor: number, perTick = 0) {
+    const previous = this.throttle[owner] ?? 1;
+    if (factor <= 1) delete this.throttle[owner]; else this.throttle[owner] = factor;
+    this.recorder?.entry('throttle', owner, factor);
+    // The feed is part of the world: the same lines in a replay (without the live measurements).
+    if (factor > previous) pushFeed(this.world, `⚡ Module "${owner}" is over its time budget: its systems now run every ${factor} ticks.`);
+    else if (factor === 1) pushFeed(this.world, `Module "${owner}" is back within its time budget.`);
+    if (!this.host.replaying) this.host.throttled?.(owner, factor, perTick);
   }
 
   /** What handlers and systems receive: the game's `Sim`, cached per tick and `dt`. */
@@ -236,7 +303,9 @@ export class Engine<W extends BaseWorld, I = unknown> {
           if (this.disabledModules[handler.owner]) continue;
           const started = performance.now();
           this.isolate(handler.owner, () => handler.value(data, this.simFor(this.dt)));
-          this.host.profile?.(handler.label, performance.now() - started);
+          const ms = performance.now() - started;
+          this.host.profile?.(handler.label, ms);
+          this.charge(handler.owner, ms);
         }
       }
     } finally {
@@ -296,6 +365,7 @@ export class Engine<W extends BaseWorld, I = unknown> {
   /** A player's (or bot's) command. An error in the handler becomes the reply, never an exception. */
   command(playerId: string, command: Command): string | void {
     if (!this.world.players[playerId] || typeof command?.type !== 'string') return;
+    this.external('cmd', playerId, command);
     this.depth++;
     try {
       if (command.type.startsWith('$')) return this.engineCommand(playerId, command);
@@ -342,12 +412,26 @@ export class Engine<W extends BaseWorld, I = unknown> {
   applyJobs() {
     if (!this.jobs.length) return;
     for (const job of this.jobs.splice(0)) {
-      this.unit(() => this.isolate('game', () => {
-        if (job.error) job.fail?.(this.world, job.error, this.ctx);
-        else job.apply(this.world, job.result, this.ctx);
-      }));
+      this.recorder?.entry('job', job.n, !job.error, job.error ? job.error.message : job.result);
+      this.runJob(job);
     }
     this.host.changed?.();
+  }
+
+  private runJob(job: Job<W>) {
+    this.unit(() => this.isolate('game', () => {
+      if (job.error) job.fail?.(this.world, job.error, this.ctx);
+      else job.apply(this.world, job.result, this.ctx);
+    }));
+  }
+
+  /** Replay: apply a recorded job result to the job the replayed code created with the same number. */
+  replayJob(n: number, ok: boolean, value: unknown) {
+    const job = this.replayJobs.get(n);
+    if (!job) return;
+    this.replayJobs.delete(n);
+    if (ok) job.result = value; else job.error = new Error(String(value));
+    this.runJob(job);
   }
 
   /** Wait for every pending job and apply the results (tests). */
@@ -380,10 +464,12 @@ export class Engine<W extends BaseWorld, I = unknown> {
     this.host.changed?.();
   }
 
-  /** Creates a player with a unique name (not online yet). */
-  addPlayer(id: string, name: string): PlayerOf<W> {
+  /** Creates a player with a unique name (not online yet). `data`: engine flags such as `gaime-ephemeral`. */
+  addPlayer(id: string, name: string, data?: Data): PlayerOf<W> {
+    this.external('join', id, name, data ?? null);
     return this.unit(() => {
       const player = this.game.createPlayer(this.world, id, this.freeName(id, cleanName(name) || `Player ${Object.keys(this.world.players).length + 1}`), this.ctx);
+      if (data) Object.assign(player.data, data);
       this.world.players[id] = player;
       this.trigger('player.joined', { player: id, bot: false });
       return player;
@@ -392,6 +478,7 @@ export class Engine<W extends BaseWorld, I = unknown> {
 
   addBot(name?: string): string {
     if (!this.game.bot) throw new Error('This game has no bot() brain (GameDefinition.bot).');
+    this.external('bot', name ?? null);
     // From the world's id counter: deterministic in seeded tests, unique across restarts.
     const id = `bot-${nextId(this.world)}`;
     const count = Object.values(this.world.players).filter(p => p.data[BOT]).length;
@@ -412,6 +499,7 @@ export class Engine<W extends BaseWorld, I = unknown> {
   setOnline(id: string, online: boolean) {
     const player = this.world.players[id] as PlayerOf<W> | undefined;
     if (!player) return;
+    this.external('online', id, online);
     player.online = online;
     this.unit(() => {
       this.isolate('game', () => this.game.onPlayerOnline?.(this.world, player, online, this.ctx));
@@ -425,6 +513,7 @@ export class Engine<W extends BaseWorld, I = unknown> {
   release(id: string) {
     const player = this.world.players[id] as PlayerOf<W> | undefined;
     if (!player) return;
+    this.external('release', id);
     this.unit(() => {
       this.isolate('game', () => this.game.onPlayerRemoved?.(this.world, player, this.ctx));
       this.trigger('player.removed', { player: id, name: player.name });
@@ -433,6 +522,79 @@ export class Engine<W extends BaseWorld, I = unknown> {
     });
     this.ensureHost();
     this.host.changed?.();
+  }
+
+  /** A returning player asked for another (free) name in the lobby. */
+  setName(id: string, name: string) {
+    const player = this.world.players[id];
+    if (!player || player.name === name) return;
+    this.external('name', id, name);
+    player.name = name;
+    this.host.changed?.();
+  }
+
+  // ── operator actions (recorded, so replays include them) ──────────
+
+  say(text: string) {
+    this.external('say', text);
+    pushFeed(this.world, `📣 ${text.slice(0, 280)}`);
+    this.host.changed?.();
+  }
+
+  setPause(pause: Pause | null) {
+    this.external('pause', pause);
+    this.world.pause = pause;
+    if (!pause) this.host.resumed?.();
+    this.host.changed?.();
+  }
+
+  /** `GameDefinition.admin[name]` — the operator's `gaime admin <name> …`. */
+  admin(name: string, args: string[]): unknown {
+    const command = this.game.admin?.[name];
+    if (!command) throw new Error(`Unknown admin command "${name}". Available: ${Object.keys(this.game.admin ?? {}).join(', ') || 'none'}`);
+    this.external('admin', name, args);
+    return this.unit(() => command.run(this.world, args, this.ctx));
+  }
+
+  /** `GameDefinition.requests[name]` for a player (RPC). The synchronous part runs like a command. */
+  request(playerId: string, name: string, payload: unknown): unknown {
+    const handler = this.game.requests?.[name];
+    if (!handler) throw new Error(`Unknown request "${name}".`);
+    this.external('req', playerId, name, payload ?? null);
+    try { return this.unit(() => handler(this.world, playerId, payload, this.ctx)); } finally { this.host.changed?.(); }
+  }
+
+  // ── recording ─────────────────────────────────────────────────────
+
+  /** Record an input from outside the simulation (only at the top level: nested calls replay by themselves). */
+  private external(type: string, ...args: unknown[]) {
+    if (this.recorder && this.depth === 0 && !this.dispatching) this.recorder.entry(type, ...args);
+  }
+
+  /** Engine runtime state a replay needs besides the world. */
+  saveState(inputs: Record<string, unknown>): EngineState {
+    return {
+      systems: Object.fromEntries(this.allSystems().map(system => [system.name, [system.next, system.last]])),
+      throttle: { ...this.throttle },
+      disabled: { ...this.disabledModules },
+      jobs: this.jobSeq,
+      inputs,
+      resources: Object.fromEntries([...this.resources].flatMap(([key, entry]) => {
+        const data = entry.options.save?.(entry.value);
+        return data === undefined ? [] : [[key, data]];
+      })),
+    };
+  }
+
+  loadState(state: EngineState) {
+    for (const system of this.allSystems()) {
+      const saved = state.systems[system.name];
+      if (saved) [system.next, system.last] = saved;
+    }
+    Object.assign(this.throttle, state.throttle);
+    Object.assign(this.disabledModules, state.disabled);
+    this.jobSeq = state.jobs;
+    for (const [key, data] of Object.entries(state.resources ?? {})) this.savedResources.set(key, data);
   }
 
   ensureHost() {
@@ -463,20 +625,28 @@ export class Engine<W extends BaseWorld, I = unknown> {
     for (const player of Object.values(this.world.players)) if (player.data[BOT]) player.online = true;
     this.unit(() => this.isolate('game', () => this.game.prepare?.(this.world, this.ctx)));
     this.ensureHost();
+    // `prepare` follows every load of a world (checkpoint, hot-reload cache): record from here.
+    this.recorder?.restart();
   }
 
   // ── resources and spatial indexes ─────────────────────────────────
 
-  resource<T>(key: string, create: () => T, dispose?: (value: T) => void): T {
+  resource<T>(key: string, create: () => T, options?: ((value: T) => void) | ResourceOptions<T>): T {
     let entry = this.resources.get(key);
-    if (!entry) { entry = { value: create(), dispose }; this.resources.set(key, entry); }
+    if (!entry) {
+      const resolved: ResourceOptions<T> = typeof options === 'function' ? { dispose: options } : options ?? {};
+      const saved = this.savedResources.get(key);
+      this.savedResources.delete(key);
+      entry = { value: saved !== undefined && resolved.load ? resolved.load(saved) : create(), options: resolved };
+      this.resources.set(key, entry);
+    }
     return entry.value as T;
   }
 
   /** The code is being replaced (hot reload, shutdown): release resources. */
   dispose() {
     for (const [key, entry] of this.resources) {
-      try { entry.dispose?.(entry.value); } catch (error) { console.error(`[gaime] dispose ${key}`, error); }
+      try { entry.options.dispose?.(entry.value); } catch (error) { console.error(`[gaime] dispose ${key}`, error); }
     }
     this.resources.clear();
     this.indexes.clear();
@@ -546,19 +716,29 @@ export class Engine<W extends BaseWorld, I = unknown> {
       log: text => { pushFeed(engine.world, text); },
       notify: (playerId, text) => engine.host.notify(playerId, text),
       nextId: () => nextId(engine.world),
-      random: engine.host.random ?? Math.random,
+      // The world's own generator (state in world.rng): deterministic, saved, replayable.
+      random: engine.host.random ?? (() => {
+        const [state, value] = mulberry(Number.isFinite(engine.world.rng) ? engine.world.rng : 1);
+        engine.world.rng = state;
+        return value;
+      }),
       isHost: playerId => engine.world.hostId === playerId,
       removePlayer: playerId => {
         const player = engine.world.players[playerId];
         if (!player) return;
+        engine.external('remove', playerId);
         engine.host.disconnect?.(playerId);
-        pushFeed(engine.world, `${player.name} left the game.`);
-        engine.release(playerId);
+        engine.unit(() => {
+          pushFeed(engine.world, `${player.name} left the game.`);
+          engine.release(playerId);
+        });
       },
       save: () => engine.host.changed?.(),
       emit: (name, data, playerId) => engine.host.send(name, data, playerId),
       job: (work, apply, fail) => {
-        const job: Job<W> = { apply: apply as Job<W>['apply'], fail: fail as Job<W>['fail'] };
+        const job: Job<W> = { n: ++engine.jobSeq, apply: apply as Job<W>['apply'], fail: fail as Job<W>['fail'] };
+        // A replay takes the result from the recording, at the tick it arrived live.
+        if (engine.host.replaying) { engine.replayJobs.set(job.n, job); work.catch(() => {}); return; }
         work.then(result => { job.result = result; engine.jobs.push(job); }, error => { job.error = error instanceof Error ? error : new Error(String(error)); engine.jobs.push(job); });
       },
       findPlayer: query => findPlayer(engine.world.players, query) as PlayerOf<W> | undefined,
@@ -588,8 +768,12 @@ export class Engine<W extends BaseWorld, I = unknown> {
     return ctx;
   }
 
-  /** Run code from outside the tick (requests, admin commands) and dispatch the events it triggers. */
+  /**
+   * Run arbitrary code from outside the tick and dispatch the events it triggers. It cannot be
+   * recorded: prefer `request`, `admin`, `command` — a recording made across it is marked incomplete.
+   */
   outside<T>(run: () => T): T {
+    if (this.recorder && this.depth === 0) this.recorder.broken ??= 'code ran outside the tick (outside())';
     try { return this.unit(run); } finally { this.host.changed?.(); }
   }
 }

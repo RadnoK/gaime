@@ -12,7 +12,8 @@
     "types": ["vite/client", "node"],
     "paths": {
       "@gaime/core": ["./packages/core/src/shared/index.ts"],
-      "@gaime/core/*": ["./packages/core/src/*/index.ts"]
+      "@gaime/core/*": ["./packages/core/src/*/index.ts"],
+      "@gaime/physics": ["./packages/physics/src/index.ts"]
     }
   }
 }

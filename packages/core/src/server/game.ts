@@ -41,9 +41,11 @@ export interface GameContext<W extends BaseWorld, E extends EventMap = EventMap,
   /**
    * A value derived from the world that is not saved (a physics world, a navigation mesh, a cache):
    * created on first use, kept for the lifetime of the loaded code, recreated after a hot reload.
-   * `dispose` runs when the code is replaced.
+   * The third argument is `dispose` (runs when the code is replaced) or options: `save`/`load`
+   * let a flight recording capture state that is not in the world (e.g. a physics engine's
+   * contact cache), so replays starting mid-game stay exact.
    */
-  resource<T>(key: string, create: () => T, dispose?: (value: T) => void): T;
+  resource<T>(key: string, create: () => T, options?: ((value: T) => void) | ResourceOptions<T>): T;
   /**
    * Entities of a `spatial` collection within `radius` of `at` (current positions, exact distance),
    * from the engine's shared index — rebuilt at most once per tick for every module together.
@@ -112,6 +114,14 @@ export interface AdminCommand<W extends BaseWorld> {
 
 export type RequestHandler<W extends BaseWorld> = (world: W, playerId: string, payload: unknown, ctx: GameContext<W>) => unknown | Promise<unknown>;
 
+export interface ResourceOptions<T> {
+  dispose?(value: T): void;
+  /** JSON (or structured-clonable) state for a flight recording; `undefined` = nothing to keep. */
+  save?(value: T): unknown;
+  /** Rebuild the value from what `save` returned (replays). Without it, `create` is used. */
+  load?(data: unknown): T;
+}
+
 export interface SpatialOptions {
   /** Grid cell size in world units. Default 4 (about the largest query radius works well). */
   cell?: number;
@@ -127,7 +137,7 @@ export type RoomsConfig =
     mode: 'matches';
     /** Players per room (humans; bots do not count). */
     size: number;
-    /** Allow `?code=`/`createPrivate` invite-only rooms. Default true. */
+    /** Allow invite-only rooms (`?code=`, `GameClient({ match: { create: 'private' } })`). Default true. */
     private?: boolean;
   };
 

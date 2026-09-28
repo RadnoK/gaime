@@ -41,13 +41,26 @@ export async function load({ url, bots = 10, seconds = 20, rate = 20, input, cha
   const deadline = Date.now() + seconds * 1000;
 
   console.log(`gaime load: ${bots} bots × ${seconds} s, input ${nextInput ? `${rate}/s` : 'off'}${chat ? `, chat ${chat}/s` : ''} → ${url}`);
-  const { roomId } = await (await fetch(`${url}/gaime/room`)).json();
+  const { roomId, mode, size } = await (await fetch(`${url}/gaime/room`)).json();
+  // Matches mode: every bot is matchmade like a player (POST /gaime/room → a seat reservation).
+  if (mode === 'matches') console.log(`matches mode: bots fill rooms of ${size}`);
+  const roomIds = new Set();
+
+  async function enter(index) {
+    const options = { name: `bot-${index + 1}`, ticket: randomBytes(18).toString('base64url'), ephemeral: true };
+    if (mode !== 'matches') return new Client(url).joinById(roomId, options);
+    const response = await fetch(`${url}/gaime/room`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(options) });
+    const answer = await response.json();
+    if (!response.ok) throw new Error(answer.error ?? `HTTP ${response.status}`);
+    return new Client(url).consumeSeatReservation(answer.reservation);
+  }
 
   async function bot(index) {
     const started = performance.now();
     try {
-      const room = await new Client(url).joinById(roomId, { name: `bot-${index + 1}`, ticket: randomBytes(18).toString('base64url'), ephemeral: true });
+      const room = await enter(index);
       rooms.push(room);
+      roomIds.add(room.roomId);
       stats.joined++; stats.joinMs.push(performance.now() - started);
       room.reconnection.enabled = false;
       for (const type of ['welcome', 'patch']) room.onMessage(type, message => { stats.patches++; stats.bytes += JSON.stringify(message).length; });
@@ -77,7 +90,7 @@ export async function load({ url, bots = 10, seconds = 20, rate = 20, input, cha
   const elapsed = seconds;
   const max = key => Math.max(0, ...stats.server.map(s => s[key]?.max ?? 0));
   const report = {
-    bots: { requested: bots, joined: stats.joined, failed: stats.failed, dropped: stats.dropped },
+    bots: { requested: bots, joined: stats.joined, failed: stats.failed, dropped: stats.dropped, rooms: roomIds.size },
     joinMs: { p50: round(percentile(stats.joinMs, 50)), p95: round(percentile(stats.joinMs, 95)) },
     rttMs: { p50: round(percentile(stats.rtt, 50)), p95: round(percentile(stats.rtt, 95)), p99: round(percentile(stats.rtt, 99)), max: round(Math.max(0, ...stats.rtt)) },
     perBot: { messagesInPerSecond: round(stats.patches / Math.max(1, stats.joined) / elapsed), approxKBInPerSecond: round(stats.bytes / 1024 / Math.max(1, stats.joined) / elapsed) },
