@@ -45,7 +45,7 @@ export function testContext<W extends BaseWorld>(world: W, options: { random?: (
   ctx.addBot = () => { throw new Error('testContext: use testGame(game) for bots, or createPlayer + data["gaime-bot"] = true.'); };
   ctx.command = (playerId, command) => options.command?.(playerId, command);
   // No tick drives this context: record triggered events right away.
-  ctx.trigger = (event, data) => { engine.trigger(event, data); engine.dispatch(); };
+  ctx.trigger = (event: string, data?: unknown) => { engine.trigger(event, data); engine.dispatch(); };
   trackJobs(ctx, jobs);
   return {
     ctx, removed, ...recorded,
@@ -84,10 +84,10 @@ export interface TestGameOptions<W extends BaseWorld> {
  *   t.run(2);                                   // 2 s of game time
  *   expect(t.command(ada, { type: 'start' })).toBeUndefined();
  */
-export function testGame<W extends BaseWorld, I>(game: GameDefinition<W, I>, options: TestGameOptions<W> = {}) {
+export function testGame<W extends BaseWorld, I, S = GameContext<W>>(game: GameDefinition<W, I, S, any>, options: TestGameOptions<W> = {}) {
   const recorded: Recorded = { notices: [], events: [], triggered: [] };
   const jobs: Array<Promise<unknown>> = [];
-  const engine = new Engine<W, I>(game, recordingHost(options, recorded, jobs));
+  const engine = new Engine<W, I>(game as GameDefinition<W, I>, recordingHost(options, recorded, jobs));
   if (options.world !== undefined) engine.world = engine.load(options.world);
   trackJobs(engine.ctx, jobs);
   engine.prepare('TEST');
@@ -112,6 +112,14 @@ export function testGame<W extends BaseWorld, I>(game: GameDefinition<W, I>, opt
     remove(id: string) { delete inputs[id]; engine.ctx.removePlayer(id); },
     addBot(name?: string) { return engine.addBot(name); },
     player(id: string) { return engine.world.players[id] as PlayerOf<W>; },
+    /** What handlers and systems receive (the game's `Sim`), to read or call helpers from a test. */
+    sim(dt = 0): S { return engine.simFor(dt) as S; },
+    /**
+     * Run code against the `Sim` like a system would: events it triggers are handled right after.
+     *
+     *   t.act(sim => sim.spawnPickup('coin', t.player(ada)));
+     */
+    act<T>(run: (sim: S) => T): T { return engine.outside(() => run(engine.simFor(engine.dt) as S)); },
     /** Hold an input for a player until it is changed or cleared with `undefined`. */
     input(id: string, input: I | undefined) { if (input === undefined) delete inputs[id]; else inputs[id] = input; },
     command(id: string, command: Command) { return engine.command(id, command); },

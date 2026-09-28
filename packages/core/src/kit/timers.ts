@@ -5,22 +5,22 @@
  */
 type Store = Record<string, number | string | boolean>;
 
-/** Cooldowns keyed by name → ready-at time. */
+/** Cooldowns keyed by name → ready-at time. Works on a `cooldowns` record or an entity's `data`. */
 export const cooldown = {
-  ready(store: Record<string, number>, key: string, time: number) {
-    return (store[key] ?? 0) <= time;
+  ready(store: Store, key: string, time: number) {
+    return Number(store[key] ?? 0) <= time;
   },
-  start(store: Record<string, number>, key: string, time: number, seconds: number) {
+  start(store: Store, key: string, time: number, seconds: number) {
     store[key] = time + seconds;
   },
   /** Starts it and returns true when it was ready; returns false otherwise. */
-  use(store: Record<string, number>, key: string, time: number, seconds: number) {
-    if ((store[key] ?? 0) > time) return false;
+  use(store: Store, key: string, time: number, seconds: number) {
+    if (Number(store[key] ?? 0) > time) return false;
     store[key] = time + seconds;
     return true;
   },
-  remaining(store: Record<string, number>, key: string, time: number) {
-    return Math.max(0, (store[key] ?? 0) - time);
+  remaining(store: Store, key: string, time: number) {
+    return Math.max(0, Number(store[key] ?? 0) - time);
   },
 };
 

@@ -30,8 +30,7 @@ export async function smoke({ url = 'http://localhost:5173', hmr = false, cwd = 
     room.reconnection.minUptime = 0;
     room.onMessage('welcome', data => { state.id = data.id; state.world = data.world; state.revision = data.revision; state.welcomes++; });
     room.onMessage('patch', patch => { if (!applyPatch(state, patch)) room.send('hello'); });
-    room.onMessage('notice', () => {});
-    room.onMessage('removed', () => {});
+    for (const type of ['notice', 'removed', 'event', 'events', 'response']) room.onMessage(type, () => {});
     room.onReconnect(() => { state.reconnects++; room.send('hello'); });
     room.onLeave(code => { state.left = code; });
     await wait(() => state.id && state.world, `${name}: welcome`);
@@ -78,7 +77,7 @@ export async function smoke({ url = 'http://localhost:5173', hmr = false, cwd = 
     rooms.push(restored);
     const again = { id: '', world: null };
     restored.onMessage('welcome', data => { again.id = data.id; again.world = data.world; });
-    restored.onMessage('patch', () => {});
+    for (const type of ['patch', 'notice', 'event', 'events', 'response']) restored.onMessage(type, () => {});
     restored.send('hello');
     await wait(() => again.id === a.state.id, 'A reconnects as the same player');
     await wait(() => b.state.world.players[a.state.id]?.online === true, 'B sees A online again');

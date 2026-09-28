@@ -7,17 +7,18 @@ It grew out of [meet-proxy-2026](https://github.com/8lines/meet-proxy-2026) and 
 | Layer | What you get |
 | --- | --- |
 | **Networking** | Authoritative Colyseus server, one shared room, world delta sync (full snapshot + revisioned patches), input throttling, reconnection, persistent player identity per browser, taking over a character from another tab, RPC (`request`), server events, backpressure. [docs/PROTOCOL.md](docs/PROTOCOL.md) |
-| **Server** | `defineGame()` — you write only the rules; the engine handles sessions, the game host role, checkpoints every 2 s, save migrations, error isolation (a broken module pauses the game instead of crashing it), chat with slash commands, worker pools for heavy computation, an admin API and metrics. [docs/SERVER.md](docs/SERVER.md) |
-| **Modules** | `src/features/<id>/server.ts` (+ optional `client.ts` with 3D models) discovered automatically — add content without touching the core and without git conflicts. |
+| **Simulation** | One consistent model for every game: a fixed-step clock (`world.time`, catch-up limit instead of spiralling), a deterministic event bus (`ctx.trigger` + `on`), modifiers (`ctx.modify`), persistent timers (`ctx.after` / `ctx.every`, saved with the world), ordered and staggered systems, module commands, and module isolation (a broken module is switched off, the game keeps running). Built to stay consistent as many people add features and to keep standing under heavy traffic. [docs/SIMULATION.md](docs/SIMULATION.md) |
+| **Server** | `defineGame()` — you write only the rules; the engine handles sessions, the game host role, checkpoints every 2 s, save migrations, error isolation, chat with slash commands, worker pools for heavy computation, an admin API and metrics (per-system/handler cost in `/gaime/stats`). [docs/SERVER.md](docs/SERVER.md) |
+| **Modules** | `src/features/<id>/server.ts` (+ optional `client.ts` with 3D models) discovered automatically — add content (definitions) and behaviour (`on`, `modify`, `systems`, `commands`) without touching the core and without git conflicts. [docs/MODULES.md](docs/MODULES.md) |
 | **Gameplay kit** | Pure, tested helpers for the usual game rules: collision and raycasts, `SpatialHash`, projectiles with gravity/wind, cooldowns and status effects, rounds (lobby → countdown → play → result), turns, inventory, teams, weighted randomness, effects. [docs/KIT.md](docs/KIT.md) |
-| **Client** | `GameClient` (connection, patches, RPC, events, network simulation `?lag=150&jitter=40&loss=5`, network stats), interpolation and prediction, `Controls` for keyboard/mouse/gamepad/touch, a ready-made HUD (`GameUi`: lobby, chat, roster, toasts, banner, dialogs, F3 stats), Three.js helpers (stage, camera rig with shake, models + glTF, entity layers, effects), sounds. [docs/CLIENT.md](docs/CLIENT.md) |
+| **Client** | `GameClient` (connection, patches, RPC, batched events, network simulation `?lag=150&jitter=40&loss=5`, network stats), interpolation and prediction, `Controls` for keyboard/mouse/gamepad/touch. Optional, replaceable defaults for everything players see: a HUD (`GameUi`: lobby, chat, roster, toasts, banner, dialogs, F3 stats), Three.js helpers (stage, camera rig, models + glTF, entity layers, effects), sounds — the look of a game is its authors' design, not the framework's. [docs/CLIENT.md](docs/CLIENT.md) |
 | **Bots and hidden info** | `bot()` brains for AI players (`/bot`), per-player `view` for cards in hand or fog of war. |
 | **Hot reload** | Locally and **on the production server**: client HMR (no page reload, the connection stays) and server HMR (the room keeps its world and identities), discovery of new modules and workers. |
 | **Deploy** | `gaime host` — a supervisor that follows `origin/main` every 3 s. **live** mode (sync + HMR, ~3 s from push) or **release** mode (isolated build, ~4 s restart, an nginx gateway keeps pages up). Gates (typecheck), automatic revert of a commit that does not start, `rollback`, checkpoint snapshots, hourly backups. Docker Compose + Traefik/Caddy, or systemd. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | **Tools** | `gaime` CLI: `status`, `rollback`, `players`, `say`, `kick`, `world`, `admin …`, `smoke`, `load` (bots, RTT p50/p99, tick cost), `new`. [docs/reference/CLI.md](docs/reference/CLI.md) |
 | **AI workflow** | `AGENTS.md` rules plus 12 skills in `.claude/skills` (new game, feature, module kind, mechanic, client, bot, worker, networking, test, debug, deploy, engine). [docs/SKILLS.md](docs/SKILLS.md) |
 
-Documentation index: [docs/README.md](docs/README.md). New here? [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md), then the [tutorial](docs/TUTORIAL.md).
+Documentation index: [docs/README.md](docs/README.md). New here? [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md), then [the simulation model](docs/SIMULATION.md) and the [tutorial](docs/TUTORIAL.md).
 
 ## Quick start
 
@@ -46,11 +47,11 @@ npm install
 npm run dev -- my-game
 ```
 
-This copies a template game with the name replaced. Then tell your AI what to build — [docs/NEW_GAME.md](docs/NEW_GAME.md) has ready-made prompts, [docs/TEMPLATES.md](docs/TEMPLATES.md) compares the templates, [docs/TUTORIAL.md](docs/TUTORIAL.md) builds a whole game step by step and [docs/COOKBOOK.md](docs/COOKBOOK.md) has recipes for rounds, teams, shops, projectiles, hidden information and more.
+This copies a template game with the name replaced. Then tell your AI what to build — [docs/NEW_GAME.md](docs/NEW_GAME.md) has ready-made prompts, [docs/SIMULATION.md](docs/SIMULATION.md) is the model every rule is written against, [docs/TEMPLATES.md](docs/TEMPLATES.md) compares the templates, [docs/TUTORIAL.md](docs/TUTORIAL.md) builds a whole game step by step and [docs/COOKBOOK.md](docs/COOKBOOK.md) has recipes for rounds, teams, shops, projectiles, hidden information and more.
 
 | Template | What it is |
 | --- | --- |
-| `blank` | the smallest complete game: walk, collect, score (~350 lines) — the default |
+| `blank` | the smallest complete game: walk, collect, score — the default, and the reference for events, modifiers, timers and systems |
 | `starter` | Crystal: co-op defense with waves, abilities, a boss, workers, RPC, admin commands |
 | `duel` | Duel: turn-based artillery with seats, rounds, projectiles, destructible terrain, a bot opponent |
 

@@ -1,6 +1,6 @@
 ---
 name: gaime-test
-description: Test gaime games and the framework — logic tests with testContext, bot-vs-bot rounds, end-to-end smoke tests with real WebSocket clients, hot-reload checks, load/latency tests, and pre-push verification. Use before pushing any change and whenever the user asks to test or debug game behaviour.
+description: Test gaime games and the framework — logic tests with testGame (the real engine without a network) and testContext, bot-vs-bot rounds, end-to-end smoke tests with real WebSocket clients, hot-reload checks, load/latency tests, and pre-push verification. Use before pushing any change and whenever the user asks to test or debug game behaviour.
 ---
 
 # Testing gaime games
@@ -16,31 +16,34 @@ Faster loops: `npx vitest run games/<game>`, `npx tsc --noEmit -p games/<game>`.
 
 ## Logic tests (most value per minute)
 
-`games/<game>/tests/*.test.ts`:
+`games/<game>/tests/*.test.ts` with **`testGame`** — the same `Engine` the server runs (fixed-step clock, timers, events, systems, modifiers, module handlers and commands, bots, jobs), driven by the test:
 
 ```ts
 import { seeded } from '@gaime/core';
-import { testContext } from '@gaime/core/server';
-import { registry } from '../src/server/registry';
-import { command, createPlayer, createWorld, prepareWorld, step } from '../src/server/simulation';
+import { testGame } from '@gaime/core/server';
+import { game } from '../src/server/game';
 
-function setup() {
-  const world = createWorld();
-  const { ctx, notices, events, flushJobs } = testContext(world, { random: seeded(1) });
-  world.players.a = createPlayer(world, 'a', 'Ada');
-  world.hostId = 'a';
-  prepareWorld(world, registry);
-  const run = (seconds: number, inputs = {}) => {
-    for (let t = 0; t < seconds; t += 1 / 30) { world.time += 1 / 30; step(world, registry, inputs, 1 / 30, ctx); }
-  };
-  return { world, ctx, run, notices, events, flushJobs };
-}
+const setup = () => testGame(game, { random: seeded(1) });
+
+test('collecting a pickup scores', () => {
+  const t = setup();
+  const ada = t.join('Ada');                          // first human = host
+  t.input(ada, { mx: 1, mz: 0 });                     // held until changed
+  t.run(3);                                           // 3 s of game time (or t.tick(n))
+  expect(t.triggeredOf('pickup.collected').length).toBeGreaterThan(0);
+  expect(t.command(ada, { type: 'reset-scores' })).toBeUndefined();
+});
 ```
 
-- `testContext` collects `notices`, `events`, `removed`; `flushJobs()` applies `ctx.job` results; pass `command` to route `ctx.command` (bots) to your `command()`.
-- Always seed randomness; advance `world.time` yourself.
-- Test: a full round/wave, commands refusing invalid use (not host, not your turn, no ammo), every module loads (`registry.lists.<kind>.length`), removed modules are cleaned by `prepareWorld`, saves: an old-shaped world goes through `hydrate`/`migrate`.
-- Games with a `bot` brain: run bot vs bot until someone wins — an excellent end-to-end rule test (see `games/duel/tests`).
+- Inspect: `t.world`, `t.player(id)`, `t.triggered` / `t.triggeredOf(event)` (bus events in order), `t.events` (client events: `ctx.emit` + forwarded), `t.notices`, `t.feed()`, `t.ctx.timeLeft(key)`, `t.ctx.timers(prefix)`.
+- Drive: `t.join`, `t.leave`, `t.remove`, `t.addBot()`, `t.input`, `t.tick`, `t.run(seconds, until?)`, `t.command`, `t.chat`, `t.request`, `await t.flushJobs()`; run `Sim` helpers like a system would with `t.act(sim => sim.spawnPickup('coin', t.player(ada)))` (its events are handled right after); `t.sim()` is for reading.
+- **Strict by default**: an exception in a module or in game code throws out of `t.tick`/`t.run`/`t.command`, so a broken module fails the test. `testGame(game, { strict: false })` tests isolation itself: `t.disabled`, `t.world.pause`.
+- Saves: `testGame(game, { world: oldShapedWorld })` hydrates and migrates it like a checkpoint.
+- Always seed randomness.
+- Test: a full round/wave (`t.run(seconds, () => done)`), events and timers (`triggeredOf`, `timeLeft`), commands refusing invalid use (not host, not your turn, no ammo), every module loads (`registry.lists.<kind>.length`) and does what it promises, removed modules are cleaned by `prepareWorld`, old saves load.
+- Games with a `bot` brain: `t.addBot(); t.addBot(); t.run(600, () => someoneWon(t.world))` — an excellent end-to-end rule test.
+
+`testContext(world, { random, command })` is for unit tests of single functions without a game: it returns `ctx`, `notices`, `events`, `triggered` (bus events are recorded, no handlers run), `advance(seconds)` (fires due timers into `triggered`), `removed`, `flushJobs()`. Anything involving handlers, systems or modules belongs in `testGame`.
 
 ## End-to-end against a running server
 
@@ -59,17 +62,18 @@ In the browser: second player `?player=2`, bad network `?lag=150&jitter=40&loss=
 npm run load -- <game> --bots 50 --seconds 30        # uses the game's input template from package.json
 ```
 
-Read `rttMs`, `perBot`, `server.tickMsMax` (< 33), `publishMsMax`, `patchBytesMax`, `eventLoopP99Max`. Bots are `ephemeral` and disappear afterwards. Never run load tests against a public game with real players without asking.
+Read `rttMs`, `perBot`, `server.tickMsMax` (< 33), `publishMsMax`, `patchBytesMax`, `eventLoopP99Max`. Meanwhile `curl -s localhost:5173/gaime/stats | jq '{droppedMs, engine, parts}'` names the systems/handlers/commands that cost the most and shows dropped time and dropped client events. Bots are `ephemeral` and disappear afterwards. Never run load tests against a public game with real players without asking.
 
 ## Framework tests
 
-`packages/core/tests` (delta sync, registry, kit, workers, a real server with WebSocket clients) and `packages/host/tests` (tree sync, dependency linking, commit filter). When changing the framework, run everything and add a test next to the code you changed.
+`packages/core/tests` (the engine in `engine.test.ts`, delta sync, registry, kit, workers, a real server with WebSocket clients) and `packages/host/tests` (tree sync, dependency linking, commit filter). When changing the framework, run everything and add a test next to the code you changed.
 
 ## Debugging tips
 
 - Write intermediate state to a file (`writeFileSync('/tmp/x.txt', …)`) inside a test when vitest swallows logs.
 - A phase that lasts one tick (e.g. `ended` followed by an automatic rematch) is easy to miss in a loop — assert on counters (wins, round) instead.
-- `/health` shows the loaded version and the last code error; `world.pause` holds the error message after a simulation exception.
+- `/health` shows the loaded version, the last code error and `disabled` modules; `world.pause` holds the error message after an exception in game code.
+- Print `t.feed()` and `t.triggered` when a test fails — they tell the story of the run.
 
 ## Reference
 

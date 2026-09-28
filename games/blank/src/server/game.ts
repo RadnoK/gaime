@@ -1,17 +1,25 @@
 import { clamp } from '@gaime/core';
 import { defineGame } from '@gaime/core/server';
-import type { Command, Input, World } from '../shared/types';
+import type { Command, Events, Input, Modifiers, Sim, World } from '../shared/types';
+import { RULES } from '../shared/rules';
 import { registry } from './registry';
-import { command, createPlayer, createWorld, prepareWorld, step } from './simulation';
+import { botInput, collect, command, createPlayer, createWorld, makeSim, prepareWorld, spawn, step } from './simulation';
 
-export const game = defineGame<World, Input>({
+/**
+ * How a tick runs (the engine does this, in this order):
+ *   timers → `step` (inputs) → systems (`collect`, then `spawn` every RULES.spawnEvery s, then module systems)
+ * and every event triggered along the way reaches the `on` handlers — the game's first, then the modules'.
+ */
+export const game = defineGame<World, Input, Sim, Events, Modifiers>({
   name: 'blank',
   network: {
     entities: ['players', 'pickups'],
     shared: ['catalog'],
-    // Server-only state stays off the wire.
-    hidden: ['timers'],
+    // Bus events clients also receive (the client plays a sound).
+    events: ['pickup.collected'],
   },
+  features: registry,
+  sim: (ctx, dt) => makeSim(registry, ctx, dt),
   createWorld,
   prepare: world => prepareWorld(world, registry),
   createPlayer: (world, id, name, ctx) => createPlayer(world, id, name, ctx.random),
@@ -20,14 +28,19 @@ export const game = defineGame<World, Input>({
     if (!input || !Number.isFinite(input.mx) || !Number.isFinite(input.mz)) return undefined;
     return { mx: clamp(input.mx!, -1, 1), mz: clamp(input.mz!, -1, 1) };
   },
-  step: (world, inputs, dt, ctx) => step(world, registry, inputs, dt, ctx),
-  command: (world, playerId, payload, ctx) => command(world, playerId, payload as Command, ctx),
-  // `/bot` in chat: a bot that walks to the nearest pickup.
-  bot(world, id) {
-    const bot = world.players[id];
-    const target = Object.values(world.pickups).sort((a, b) => Math.hypot(a.x - bot.x, a.z - bot.z) - Math.hypot(b.x - bot.x, b.z - bot.z))[0];
-    if (!target) return { mx: 0, mz: 0 };
-    const d = Math.hypot(target.x - bot.x, target.z - bot.z) || 1;
-    return { mx: (target.x - bot.x) / d, mz: (target.z - bot.z) / d };
+  step,
+  systems: [
+    { id: 'collect', run: sim => collect(sim, registry) },
+    { id: 'spawn', every: RULES.spawnEvery, run: spawn },
+  ],
+  on: {
+    // Scoring is a reaction to the event, so modules can react to the same event too.
+    'pickup.collected': ({ playerId, points }, sim) => {
+      const player = sim.world.players[playerId];
+      if (player) player.score += points;
+    },
+    'pickup.expired': ({ pickup }, sim) => { delete sim.world.pickups[pickup]; },
   },
+  command: (world, playerId, payload, ctx) => command(world, playerId, payload as Command, ctx),
+  bot: botInput,
 });

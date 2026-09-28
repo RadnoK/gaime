@@ -1,6 +1,6 @@
 # Network protocol
 
-WebSocket via Colyseus (MessagePack). Protocol version: `PROTOCOL_VERSION = 2` (`packages/core/src/shared/protocol.ts`), sent in `welcome`.
+WebSocket via Colyseus (MessagePack). Protocol version: `PROTOCOL_VERSION = 3` (`packages/core/src/shared/protocol.ts`), sent in `welcome`. Version 3 added batched client events (`events`); older clients keep working with one `event` message per event.
 
 ## Messages
 
@@ -8,21 +8,23 @@ WebSocket via Colyseus (MessagePack). Protocol version: `PROTOCOL_VERSION = 2` (
 | --- | --- | --- | --- |
 | C→S | `hello` | — | ask for a full snapshot (after a reconnect / a patch that did not fit) |
 | C→S | `input` | game input | continuous; `GameClient.input()` sends changes at most ~30/s and repeats the state every 150 ms; the server keeps the last input for 400 ms; validated by `parseInput` |
-| C→S | `command` | `{ type, ... }` | a discrete action → `game.command`; types starting with `$` are engine commands (`$chat`, `$pause`, `$resume`) |
+| C→S | `command` | `{ type, ... }` | a discrete action → a module's `commands[type]` if one registered it, else `game.command`; types starting with `$` are engine commands (`$chat`, `$pause`, `$resume`) |
 | C→S | `request` | `{ id, name, payload }` | RPC → `game.requests[name]`, answered with `response` |
 | S→C | `welcome` | `{ id, game, version, protocol, revision, host, world }` | full world projection + your player id |
 | S→C | `patch` | `{ base, revision, values?, removed?, entities?, streams? }` | difference against `base`; a wrong `base` makes the client send `hello` |
 | S→C | `response` | `{ id, ok, result?, error? }` | |
-| S→C | `event` | `{ name, data }` | `ctx.emit()`; never stored in the world (sounds, screen shake) |
+| S→C | `events` | `[[name, data], …]` | protocol 3+ clients: every client event of one server tick in one message, in order — `ctx.emit()` and bus events listed in `network.events`; never stored in the world (sounds, screen shake) |
+| S→C | `event` | `{ name, data }` | the same events, one message each, for clients that did not join with `protocol ≥ 3` |
 | S→C | `notice` | text | private answer / toast |
 | S→C | `removed` | — | you were removed from the game; close code 4102 follows |
 
 ## Joining
 
 1. `GET /gaime/room` → `{ roomId }` of the one shared room.
-2. Colyseus `joinById(roomId, options)` with `{ ticket, name, ephemeral? }`:
+2. Colyseus `joinById(roomId, options)` with `{ ticket, name, protocol?, ephemeral? }`:
    - `ticket` — the browser identity (random, kept in localStorage per game and `?player=` slot); `onAuth` maps it to a player id. Never sent to other clients.
    - `name` — the lobby nickname (trimmed, ≤ 24 characters, made unique: a taken name becomes `Name 2`, `Name 3`…; a returning player keeps their name if the requested one is taken, with a notice).
+   - `protocol` — the client's protocol version (`GameClient` sends `PROTOCOL_VERSION`). `3` or more: the client receives batched `events` messages; absent or lower: one `event` message per event. The option name is exported as `JOIN_PROTOCOL`.
    - `ephemeral: true` — a throwaway player (load-test bots): marked `data['gaime-ephemeral']` and removed from the world when it leaves.
 3. The server answers with `welcome`, then patches.
 
@@ -30,7 +32,22 @@ Reconnects use Colyseus' reconnection token within `reconnectSeconds`; after tha
 
 Close codes: **4102** removed, **4103** the game was opened in another tab. (4000–4010 belong to Colyseus.)
 
-HTTP: `GET /health` → `{ ok, game, version, error, uptime }` (the version of the code that is **loaded** — also after HMR), `GET /gaime/room` → `{ roomId }`, `GET /gaime/stats` → tick rate, tick/publish costs, patch sizes, event-loop delay, memory, workers (reading it resets nothing). `/gaime/admin/*` — operator API (token).
+HTTP: `GET /health` → `{ ok, game, version, error, disabled?, uptime }` (the version of the code that is **loaded** — also after HMR — and modules switched off after an error), `GET /gaime/room` → `{ roomId }`, `GET /gaime/stats` → tick rate, tick/publish costs, patch sizes, event-loop delay, dropped simulated time, engine counters, the most expensive systems/handlers/commands (`parts`), memory, workers (reading it resets nothing). `/gaime/admin/*` — operator API (token).
+
+## Client events
+
+Two sources feed the same channel:
+
+- `ctx.emit(name, data, playerId?)` — an ad-hoc event to everyone or one player;
+- **forwarded bus events** — every event named in `network.events` is, besides being dispatched to `on` handlers on the server, queued for every client with its payload:
+
+  ```ts
+  network: { events: ['pickup.collected'] },        // games/blank
+  // client
+  net.onEvent('pickup.collected', ({ playerId }) => { … });           // or net.on('event', (name, data) => …) for all
+  ```
+
+The room collects the events of one tick and sends each client **one message** at the end of the tick: `events` with `[[name, data], …]` in order (events to everyone first, then that player's own). At most **256 events per client per tick** are sent; the rest are dropped and counted in `/gaime/stats` → `engine.droppedEvents` — a flood of sounds helps nobody, and an unbounded list would hurt everyone's bandwidth. Events are never stored or replayed: a client that joins or reconnects later does not see them. Anything that must be seen later belongs in the world.
 
 ## Delta sync
 
@@ -41,7 +58,7 @@ The server never sends the authoritative object. On publish it makes a **project
 - `values` — everything else as whole values when they change. **New world fields work without configuration** — just less efficiently until you add them to `entities`/`streams`.
 - `shared` — keys replaced wholesale and never mutated (e.g. `catalog`): compared by reference, left out of the checkpoint, rebuilt in `prepare`.
 
-Clients sharing a base get the same bytes (one diff and one encoding per group). With a per-player `view` (hidden information, [SERVER.md](SERVER.md#per-player-views)) each client's projection is passed through `view(projection, playerId)` and diffed separately — more CPU per publish, same wire format. A client whose send buffer exceeds 64 KB is skipped until it drains (then it gets a patch from its own base).
+The engine's timer queue (`world.schedule`) is always hidden — it never leaves the server (operators still see it with `gaime world`). Clients sharing a base get the same bytes (one diff and one encoding per group). With a per-player `view` (hidden information, [SERVER.md](SERVER.md#per-player-views)) each client's projection is passed through `view(projection, playerId)` and diffed separately — more CPU per publish, same wire format. A client whose send buffer exceeds 64 KB is skipped until it drains (then it gets a patch from its own base).
 
 ```ts
 network: {
@@ -57,9 +74,10 @@ publishEvery: 2,                  // 30 Hz tick / 2 = 15 patches per second
 ## Client
 
 ```ts
-const net = new GameClient<World, Input, Command>({ game: 'my-game' });
+const net = new GameClient<World, Input, Command, Events>({ game: 'my-game' });
 net.on('world', (world, previous) => render(world));
-net.on('event', (name, data) => { if (name === 'sound') play(data); });
+net.onEvent('enemy.died', ({ x, z }) => boom(x, z));                     // a forwarded bus event, typed from Events
+net.on('event', (name, data) => { if (name === 'sound') play(data); });   // every event: ctx.emit and forwarded ones
 net.on('status', (state, text) => hud.status(state, text));
 await net.join('Ola');
 net.input({ mx, mz, ax, az, fire });
@@ -95,4 +113,4 @@ chat: {
 
 Bots join with the `ephemeral` option — their characters disappear after the test and do not litter the save.
 
-When the tick cannot keep up: make `step` cheaper (spatial indexes, less frequent AI), move heavy work to workers, raise `publishEvery`, add large dictionaries to `entities`, hide server-only state with `hidden`, round more fields.
+When the tick cannot keep up: find the expensive part in `/gaime/stats` → `parts` (systems, handlers and commands by module, in ms per second), make it cheaper (spatial indexes; AI in a system with `every` instead of every tick), move heavy work to workers, raise `publishEvery`, add large dictionaries to `entities`, hide server-only state with `hidden`, round more fields. The server's fixed-step clock catches up at most 3 ticks after a slow one; beyond that the game slows down briefly and `droppedMs` in `/gaime/stats` grows.

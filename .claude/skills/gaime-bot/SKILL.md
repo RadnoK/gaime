@@ -30,7 +30,7 @@ defineGame<World, Input>({
 
 1. **Stateless between ticks** or state in `player.data['bot-…']` — module-level variables are lost on hot reload. Deterministic "personality": derive it from the id (`botId.charCodeAt(4)`) or store it in `data` on the first tick.
 2. **Only public information** unless the design says otherwise — a bot that reads the opponent's hidden hand is no fun.
-3. **Cheap**: it runs every tick. Use `nearest`, `SpatialHash`, cached targets in `data` (re-pick every 0.5 s with `every`). Planning that takes more than ~1 ms → a worker (`gaime-worker` skill) whose result is written to `data`.
+3. **Cheap**: it runs every tick. Use `nearest`, `SpatialHash`, cached targets in `data` (re-pick every 0.5 s with the kit's `every(me.data, 'bot-think', world.time, 0.5)`, or let a system with `every: 0.5` pick targets for all bots and store them in `data`). Planning that takes more than ~1 ms → a worker (`gaime-worker` skill) whose result is written to `data`.
 4. **Imperfect on purpose**: add aim error (`range(ctx.random, -e, e)`), reaction delay (act only when `world.time > data['bot-seen'] + 0.3`), and a difficulty knob in the game's `RULES`.
 5. **Commands through `ctx.command`**, never by mutating the world directly — refusals (cooldowns, not your turn) apply to bots as well. It returns the reply string and never throws (a bug in the command comes back as `Error in the code of command …`).
 6. Turn-based games: act once per turn (store the turn number in `data`), and wait a moment before acting so humans can follow.
@@ -40,21 +40,29 @@ defineGame<World, Input>({
 - Chase / flee: vector to the target, normalised (see the Tag tutorial in `docs/TUTORIAL.md`).
 - Aim with a ballistic arc: `ballisticAngle(from, target, speed, gravity)` from the kit (`games/duel`).
 - Defend a point: pick a slot on a circle around it from the id, go there when no enemy is close.
-- Fill empty games: in `step`, if fewer than N humans are online and the match is in the lobby, `ctx.addBot()`; remove bots when humans arrive (`ctx.removePlayer(botId)`).
+- Fill empty games: react to the engine events — `on: { 'player.online': …, 'player.offline': … }` — or use a system with `every: 2`: if fewer than N humans are online and the match is in the lobby, `ctx.addBot()`; remove bots when humans arrive (`ctx.removePlayer(botId)`).
 
 ## Test with bots
 
-Bot vs bot until someone wins is the best rule test (`games/duel/tests/simulation.test.ts`):
+Bot vs bot until someone wins is the best rule test. `testGame` runs bots exactly like the server — `bot()` every tick, commands through the real command routing (game and module commands):
 
 ```ts
-const { ctx } = testContext(world, { random: seeded(1), command: (id, c) => command(world, registry, id, c as Command, ctx) });
-for (const id of ['a', 'b']) world.players[id].data['gaime-bot'] = true;
-const brains = () => Object.fromEntries(['a', 'b'].map(id => [id, game.bot!(world, id, ctx)]).filter(([, i]) => i));
-for (let i = 0; i < 1500 && !winner(world); i++) run(1, brains);
+import { seeded } from '@gaime/core';
+import { testGame } from '@gaime/core/server';
+import { game } from '../src/server/game';
+
+test('two bots finish a round', () => {
+  const t = testGame(game, { random: seeded(1) });
+  const a = t.addBot('A');
+  const b = t.addBot('B');
+  t.run(300, () => !!winner(t.world));             // up to 5 minutes of game time, stops at the result
+  expect(winner(t.world)).toBeDefined();
+  expect([a, b]).toContain(winner(t.world));
+});
 ```
 
-Pass `command` to `testContext` — otherwise bot commands are ignored. Then play against it in the browser (`/bot`) and watch a few rounds of bots only.
+A human and a bot: `const ada = t.join('Ada'); t.addBot();` — the join also exercises seat hand-over in seat-based games. Bot ids come from the world's id counter, so seeded runs are reproducible. Then play against it in the browser (`/bot`) and watch a few rounds of bots only.
 
 ## Reference
 
-`docs/SERVER.md#bots`, `docs/COOKBOOK.md#bots`, `docs/KIT.md` (nearest, cooldowns, ballisticAngle), `docs/TESTING.md` (bot-vs-bot tests).
+`docs/SERVER.md#bots`, `docs/COOKBOOK.md#bots`, `docs/KIT.md` (nearest, cooldowns, ballisticAngle), `docs/TESTING.md` (`testGame`, bot-vs-bot tests).

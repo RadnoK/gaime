@@ -6,6 +6,7 @@ export const RULES = {
   gravity: 25,
   moveSpeed: 4,
   aimSpeed: 70,
+  countdownSeconds: 3,
   turnSeconds: 30,
   retreatSeconds: 3,
   maxWind: 8,

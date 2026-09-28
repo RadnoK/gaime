@@ -190,8 +190,22 @@ These are time-based helpers that store their state in plain records, so they su
 
 | Helper | Store type |
 | --- | --- |
-| `cooldown.*` | `Record<string, number>` (for example `player.cooldowns`) |
-| `every`, `schedule`, `due`, `status.*` | `Record<string, number \| string \| boolean>` (for example `player.data`, `entity.data`, `world.timers`) |
+| `cooldown.*` | `Record<string, number \| string \| boolean>` (for example `player.cooldowns` or `player.data`) |
+| `every`, `schedule`, `due`, `status.*` | `Record<string, number \| string \| boolean>` (for example `player.data`, `entity.data`) |
+
+### Kit timers or engine timers?
+
+The engine has its own time-based mechanisms ([SIMULATION.md](SIMULATION.md)). They do different jobs:
+
+| You need… | Use | Why |
+| --- | --- | --- |
+| a duration you **read on demand** — "is this player stunned / shielded / slowed?", "is the dash ready?" | kit `status` / `cooldown` in `entity.data` / `player.cooldowns` | costs nothing until somebody asks; synchronised, so the client can draw it |
+| something that must **happen** once, later — a fuse, a respawn, a pickup expiring, a delayed reward | an engine timer: `ctx.after(3, 'bomb.explode', { bomb: id }, { key: `bomb:${id}` })` | fires an event other modules can react to; one heap for the whole game instead of a check per entity per tick; cancellable by key |
+| a repeating game-wide rhythm with an event — a storm pulse every 10 s, a burn that ticks 5 times | `ctx.every(seconds, event, data, { key, times? })` | same, recurring |
+| periodic **work** — a spawner, regeneration, AI thinking at 5 Hz | a system with `every: seconds` | the engine staggers periodic systems across ticks, measures them in `/gaime/stats` → `parts`, and isolates module errors |
+| a simple per-entity rhythm inside code that already runs every tick (an enemy that slams every 6 s) | kit `every(entity.data, 'slam', time, 6)` or `schedule`/`due` | fine for simple cases; no event needed |
+
+Rule of thumb: kit helpers are **state you read**, engine timers are **events that fire**, systems are **work that runs**. The kit `every` is still fine for small, local cases; for game-level periodic work, a system with `every` is the preferred engine-level way.
 
 ### `cooldown`
 
@@ -220,11 +234,11 @@ This returns true once every `interval` seconds. Call it every tick.
 - The key holds the next firing time. `delete store[key]` resets the timer.
 
 ```ts
-// games/blank/src/server/simulation.ts: world.timers is hidden from the network but saved
-if (Object.keys(world.pickups).length < RULES.maxPickups && every(world.timers, 'spawn', world.time, RULES.spawnEvery)) {
-  spawnPickup(world, ctx);
-}
+// an enemy that slams every 6 s, inside an enemy system that already runs every tick
+if (every(enemy.data, 'ola-slam', world.time, 6)) slam(sim, enemy);
 ```
+
+For a game-wide spawner prefer a system: `systems: [{ id: 'spawn', every: RULES.spawnEvery, run: spawn }]` (this is what `games/blank/src/server/game.ts` does).
 
 ### `schedule(store, key, time, delay)` and `due(store, key, time): boolean`
 
@@ -611,15 +625,22 @@ function command(world: World, playerId: string, command: Command, ctx: GameCont
 
 ### Periodic spawns at the arena edge
 
+A spawner is periodic work, so it is a system with `every` (the engine staggers it and measures it); the kit chooses and places. `ctx` here is the `GameContext` (a system receives it when the game defines no `Sim`; with a `Sim`, use its equivalents).
+
 ```ts
-if (world.phase === 'fight' && every(world.timers, 'spawn', world.time, 2.5)) {
+// defineGame({ systems: [{ id: 'spawn', every: 2.5, run: ctx => spawnAtEdge(ctx, registry) }, { id: 'separate', run: ctx => separateEnemies(ctx, registry) }] })
+function spawnAtEdge(ctx: GameContext<World>, registry: Registry) {
+  const world = ctx.world;
+  if (world.phase !== 'fight') return;
   const def = weighted(ctx.random, registry.lists.enemies, e => e.weight ?? 1);
-  if (def) {
-    const at = pointOnCircle(ctx.random, { x: 0, z: 0 }, RULES.arenaRadius - 1.5);
-    const id = `e${ctx.nextId()}`;
-    world.enemies[id] = { id, kind: def.id, ...at, angle: angleTo(at, { x: 0, z: 0 }), hp: def.hp, maxHp: def.hp, data: {} };
-    addEffect(world.effects, ctx.nextId(), 'spawn', world.time, at, { radius: def.radius, color: def.visual.color });
-  }
+  if (!def) return;
+  const at = pointOnCircle(ctx.random, { x: 0, z: 0 }, RULES.arenaRadius - 1.5);
+  const id = `e${ctx.nextId()}`;
+  world.enemies[id] = { id, kind: def.id, ...at, angle: angleTo(at, { x: 0, z: 0 }), hp: def.hp, maxHp: def.hp, data: {} };
+  addEffect(world.effects, ctx.nextId(), 'spawn', world.time, at, { radius: def.radius, color: def.visual.color });
 }
-separate(Object.values(world.enemies), e => registry.kinds.enemies[e.kind]?.radius ?? 0.5);
+
+function separateEnemies(ctx: GameContext<World>, registry: Registry) {
+  separate(Object.values(ctx.world.enemies), e => registry.kinds.enemies[e.kind]?.radius ?? 0.5);
+}
 ```

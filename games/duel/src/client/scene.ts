@@ -140,7 +140,7 @@ export class Battlefield {
   private drawPreview(world: World) {
     const me = world.players[this.meId];
     const turns = world.turns;
-    const active = me && turns && turns.order[turns.index] === me.id && !world.shotFired && world.match.phase === 'playing';
+    const active = me && turns && turns.order[turns.index] === me.id && world.turnPhase === 'aim' && world.match.phase === 'playing';
     this.preview.visible = !!active;
     if (!active) return;
     const weapon = world.catalog.find(e => e.kind === 'weapons' && e.id === me.weapon);

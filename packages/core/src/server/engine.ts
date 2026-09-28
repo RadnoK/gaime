@@ -36,7 +36,7 @@ type Job<W extends BaseWorld> = { apply: (world: W, result: unknown, ctx: GameCo
 type RunningSystem = { owner: string; def: SystemDef; name: string; next: number; last: number };
 
 const BOT = 'gaime-bot';
-/** Events per tick before the engine calls it a storm (a handler triggering itself). */
+/** Events in one dispatch cycle before the engine calls it a storm (a handler triggering itself). */
 const MAX_EVENTS_PER_TICK = 50_000;
 /** Timers fired per tick; the rest fire on the following ticks, spreading load spikes. */
 const MAX_TIMERS_PER_TICK = 5_000;
@@ -81,6 +81,8 @@ export class Engine<W extends BaseWorld, I = unknown> {
   private readonly jobs: Job<W>[] = [];
   private readonly chatHandler: ReturnType<typeof createChat<W>>;
   private dispatching = false;
+  /** Pieces of work in progress: events wait until the outermost one finishes. */
+  private depth = 0;
   private eventsThisTick = 0;
   private sim: { key: string; value: unknown } | undefined;
 
@@ -90,7 +92,7 @@ export class Engine<W extends BaseWorld, I = unknown> {
     this.forwarded = resolveNetwork(game.network).events;
     // The game's own behaviour first, then modules in registry (file) order.
     const behaviour = { handlers: [] as Array<Owned<{ event: string; run: EventHandler }>>, modifiers: [] as Array<Owned<{ name: string; run: Modifier }>>, systems: [] as Array<Owned<SystemDef>>, commands: {} as Record<string, Owned<CommandHandler>> };
-    collectBehaviour(behaviour, { on: game.on, modify: game.modify, systems: game.systems }, 'game', `game ${game.name}`);
+    collectBehaviour(behaviour, { on: game.on, modify: game.modify, systems: game.systems, commands: game.commands }, 'game', `game ${game.name}`);
     const features = game.features;
     for (const handler of [...behaviour.handlers, ...(features?.handlers ?? [])]) {
       const list = this.handlers.get(handler.value.event) ?? [];
@@ -106,7 +108,11 @@ export class Engine<W extends BaseWorld, I = unknown> {
       this.systems[system.value.phase ?? 'update'].push({ owner: system.owner, def: system.value, name: `${system.owner}/${system.value.id}`, next: 0, last: 0 });
     }
     this.alignSystems();
-    Object.assign(this.commands, features?.commands ?? {});
+    Object.assign(this.commands, behaviour.commands);
+    for (const [type, command] of Object.entries(features?.commands ?? {})) {
+      if (this.commands[type]) throw new Error(`Module ${command.owner}: command "${type}" is already handled by the game.`);
+      this.commands[type] = command;
+    }
     this.ctx = this.context();
     this.chatHandler = createChat(game as GameDefinition<W, unknown>, {
       ctx: this.ctx,
@@ -120,7 +126,6 @@ export class Engine<W extends BaseWorld, I = unknown> {
 
   /** Advance one fixed tick. `inputs` are the humans' current inputs; bots are added here. */
   step(inputs: Readonly<Record<string, I>> = {}) {
-    this.eventsThisTick = 0;
     this.applyJobs();
     const world = this.world;
     if (world.pause) return;
@@ -129,7 +134,7 @@ export class Engine<W extends BaseWorld, I = unknown> {
       const bots: Record<string, I> = {};
       for (const player of Object.values(world.players)) {
         if (!player.data[BOT]) continue;
-        const input = this.isolate('game', () => this.game.bot!(world, player.id, this.ctx));
+        const input = this.unit(() => this.isolate('game', () => this.game.bot!(world, player.id, this.ctx)));
         if (input !== undefined) bots[player.id] = input;
       }
       all = { ...inputs, ...bots };
@@ -145,9 +150,8 @@ export class Engine<W extends BaseWorld, I = unknown> {
     this.runSystems('input');
     if (this.game.step && !world.pause) {
       const started = performance.now();
-      this.isolate('game', () => this.game.step!(world, all, this.dt, this.ctx));
+      this.unit(() => this.isolate('game', () => this.game.step!(world, all, this.dt, this.ctx, this.simFor(this.dt))));
       this.host.profile?.('game/step', performance.now() - started);
-      this.dispatch();
     }
     this.runSystems('update');
     this.runSystems('late');
@@ -166,9 +170,8 @@ export class Engine<W extends BaseWorld, I = unknown> {
         system.next = system.next + every > this.world.time ? system.next + every : this.world.time + every;
       }
       const started = performance.now();
-      this.isolate(system.owner, () => system.def.run(this.simFor(dt), dt));
+      this.unit(() => this.isolate(system.owner, () => system.def.run(this.simFor(dt), dt)));
       this.host.profile?.(system.name, performance.now() - started);
-      this.dispatch();
     }
   }
 
@@ -194,14 +197,23 @@ export class Engine<W extends BaseWorld, I = unknown> {
   trigger(event: string, data: unknown) {
     if (++this.eventsThisTick > MAX_EVENTS_PER_TICK) {
       this.queue.length = 0;
-      throw new Error(`Event storm: more than ${MAX_EVENTS_PER_TICK} events in one tick (last: "${event}"). Does a handler trigger the event it handles?`);
+      throw new Error(`Event storm: more than ${MAX_EVENTS_PER_TICK} events at once (last: "${event}"). Does a handler trigger the event it handles?`);
     }
     this.queue.push({ event, data });
   }
 
+  /**
+   * Run one piece of work (a system, `step`, a command, a player change); queued events are
+   * dispatched when the outermost piece finishes — never in the middle of someone's code.
+   */
+  private unit<T>(run: () => T): T {
+    this.depth++;
+    try { return run(); } finally { this.depth--; if (this.depth === 0) this.dispatch(); }
+  }
+
   /** Run the handlers of every queued event, including events they trigger (FIFO). */
   dispatch() {
-    if (this.dispatching) return;
+    if (this.dispatching || this.depth > 0) return;
     this.dispatching = true;
     try {
       for (let index = 0; index < this.queue.length; index++) {
@@ -221,6 +233,7 @@ export class Engine<W extends BaseWorld, I = unknown> {
     } finally {
       this.queue.length = 0;
       this.dispatching = false;
+      this.eventsThisTick = 0;
     }
   }
 
@@ -274,6 +287,7 @@ export class Engine<W extends BaseWorld, I = unknown> {
   /** A player's (or bot's) command. An error in the handler becomes the reply, never an exception. */
   command(playerId: string, command: Command): string | void {
     if (!this.world.players[playerId] || typeof command?.type !== 'string') return;
+    this.depth++;
     try {
       if (command.type.startsWith('$')) return this.engineCommand(playerId, command);
       const feature = this.commands[command.type];
@@ -293,7 +307,8 @@ export class Engine<W extends BaseWorld, I = unknown> {
         this.host.profile?.(`${feature?.owner ?? 'game'} command ${command.type}`, performance.now() - started);
       }
     } finally {
-      this.dispatch();
+      this.depth--;
+      if (this.depth === 0) this.dispatch();
       this.host.changed?.();
     }
   }
@@ -318,11 +333,10 @@ export class Engine<W extends BaseWorld, I = unknown> {
   applyJobs() {
     if (!this.jobs.length) return;
     for (const job of this.jobs.splice(0)) {
-      this.isolate('game', () => {
+      this.unit(() => this.isolate('game', () => {
         if (job.error) job.fail?.(this.world, job.error, this.ctx);
         else job.apply(this.world, job.result, this.ctx);
-      });
-      this.dispatch();
+      }));
     }
     this.host.changed?.();
   }
@@ -359,23 +373,29 @@ export class Engine<W extends BaseWorld, I = unknown> {
 
   /** Creates a player with a unique name (not online yet). */
   addPlayer(id: string, name: string): PlayerOf<W> {
-    const player = this.game.createPlayer(this.world, id, this.freeName(id, cleanName(name) || `Player ${Object.keys(this.world.players).length + 1}`), this.ctx);
-    this.world.players[id] = player;
-    this.dispatch();
-    return player;
+    return this.unit(() => {
+      const player = this.game.createPlayer(this.world, id, this.freeName(id, cleanName(name) || `Player ${Object.keys(this.world.players).length + 1}`), this.ctx);
+      this.world.players[id] = player;
+      this.trigger('player.joined', { player: id, bot: false });
+      return player;
+    });
   }
 
   addBot(name?: string): string {
     if (!this.game.bot) throw new Error('This game has no bot() brain (GameDefinition.bot).');
-    const id = `bot-${Math.random().toString(36).slice(2, 10)}`;
+    // From the world's id counter: deterministic in seeded tests, unique across restarts.
+    const id = `bot-${nextId(this.world)}`;
     const count = Object.values(this.world.players).filter(p => p.data[BOT]).length;
-    const player = this.game.createPlayer(this.world, id, this.freeName(id, cleanName(name ?? '') || `Bot ${count + 1}`), this.ctx);
-    player.data[BOT] = true;
-    player.online = true;
-    this.world.players[id] = player;
-    pushFeed(this.world, `🤖 ${player.name} joined the game.`);
-    this.isolate('game', () => this.game.onPlayerOnline?.(this.world, player, true, this.ctx));
-    this.dispatch();
+    this.unit(() => {
+      const player = this.game.createPlayer(this.world, id, this.freeName(id, cleanName(name ?? '') || `Bot ${count + 1}`), this.ctx);
+      player.data[BOT] = true;
+      player.online = true;
+      this.world.players[id] = player;
+      pushFeed(this.world, `🤖 ${player.name} joined the game.`);
+      this.trigger('player.joined', { player: id, bot: true });
+      this.isolate('game', () => this.game.onPlayerOnline?.(this.world, player, true, this.ctx));
+      this.trigger('player.online', { player: id });
+    });
     this.host.changed?.();
     return id;
   }
@@ -384,8 +404,10 @@ export class Engine<W extends BaseWorld, I = unknown> {
     const player = this.world.players[id] as PlayerOf<W> | undefined;
     if (!player) return;
     player.online = online;
-    this.isolate('game', () => this.game.onPlayerOnline?.(this.world, player, online, this.ctx));
-    this.dispatch();
+    this.unit(() => {
+      this.isolate('game', () => this.game.onPlayerOnline?.(this.world, player, online, this.ctx));
+      this.trigger(online ? 'player.online' : 'player.offline', { player: id });
+    });
     this.ensureHost();
     this.host.changed?.();
   }
@@ -394,10 +416,12 @@ export class Engine<W extends BaseWorld, I = unknown> {
   release(id: string) {
     const player = this.world.players[id] as PlayerOf<W> | undefined;
     if (!player) return;
-    this.isolate('game', () => this.game.onPlayerRemoved?.(this.world, player, this.ctx));
-    delete this.world.players[id];
-    cancelTimers(this.world.schedule, `player:${id}:`);
-    this.dispatch();
+    this.unit(() => {
+      this.isolate('game', () => this.game.onPlayerRemoved?.(this.world, player, this.ctx));
+      this.trigger('player.removed', { player: id, name: player.name });
+      delete this.world.players[id];
+      cancelTimers(this.world.schedule, `player:${id}:`);
+    });
     this.ensureHost();
     this.host.changed?.();
   }
@@ -428,8 +452,7 @@ export class Engine<W extends BaseWorld, I = unknown> {
     this.alignSystems();
     if (!this.frozen && this.world.pause?.reason === 'error') this.world.pause = null;
     for (const player of Object.values(this.world.players)) if (player.data[BOT]) player.online = true;
-    this.isolate('game', () => this.game.prepare?.(this.world, this.ctx));
-    this.dispatch();
+    this.unit(() => this.isolate('game', () => this.game.prepare?.(this.world, this.ctx)));
     this.ensureHost();
   }
 
@@ -462,10 +485,10 @@ export class Engine<W extends BaseWorld, I = unknown> {
       addBot: name => engine.addBot(name),
       isBot: playerId => !!engine.world.players[playerId]?.data[BOT],
       command: (playerId, command) => engine.command(playerId, command),
-      trigger: (event, data) => engine.trigger(event, data),
+      trigger: (event: string, data?: unknown) => engine.trigger(event, data),
       modify: (name, value, data) => engine.modify(name, value, data),
-      after: (seconds, event, data, options) => addTimer(schedule(), engine.world.time, seconds, event, data, { key: options?.key }),
-      every: (seconds, event, data, options) => {
+      after: (seconds: number, event: string, data?: unknown, options?: { key?: string }) => addTimer(schedule(), engine.world.time, seconds, event, data, { key: options?.key }),
+      every: (seconds: number, event: string, data?: unknown, options?: { key?: string; times?: number }) => {
         const live = options?.key ? schedule().live[options.key] : undefined;
         if (live && live.event === event && live.every === seconds) return options!.key!;
         return addTimer(schedule(), engine.world.time, seconds, event, data, { ...options, every: seconds });
@@ -481,6 +504,6 @@ export class Engine<W extends BaseWorld, I = unknown> {
 
   /** Run code from outside the tick (requests, admin commands) and dispatch the events it triggers. */
   outside<T>(run: () => T): T {
-    try { return run(); } finally { this.dispatch(); this.host.changed?.(); }
+    try { return this.unit(run); } finally { this.host.changed?.(); }
   }
 }

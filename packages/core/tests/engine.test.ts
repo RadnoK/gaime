@@ -222,4 +222,59 @@ describe('engine', () => {
     advance(1);
     expect(triggered.map(t => t.event)).toEqual(['bonus', 'ping']);
   });
+
+  test('engine player events are on every game bus', () => {
+    const seen: string[] = [];
+    const t = testGame(makeGame({ watcher: { on: {
+      'player.joined': ({ player, bot }) => { seen.push(`joined:${player}:${bot}`); },
+      'player.online': ({ player }) => { seen.push(`online:${player}`); },
+      'player.offline': ({ player }) => { seen.push(`offline:${player}`); },
+      'player.removed': ({ name }) => { seen.push(`removed:${name}`); },
+    } } }));
+    const ada = t.join('Ada');
+    t.leave(ada);
+    t.remove(ada);
+    expect(seen).toEqual([`joined:${ada}:false`, `online:${ada}`, `offline:${ada}`, 'removed:Ada']);
+  });
+
+  test('module-private events need no declaration; timers can fire them', () => {
+    const t = testGame(makeGame({ fuse: {
+      commands: { 'fuse-light': (_id, _c, sim) => { sim.ctx.after(0.5, 'fuse:boom', { power: 3 }); } },
+      on: { 'fuse:boom': ({ power }, sim) => { sim.world.log.push(`boom ${power}`); } },
+    } }));
+    const ada = t.join('Ada');
+    t.command(ada, { type: 'fuse-light' });
+    t.run(0.6);
+    expect(t.world.log).toEqual(['boom 3']);
+  });
+
+  test('events wait until the running code finishes, even when it removes a player mid-way', () => {
+    const order: string[] = [];
+    const game = makeGame({ trace: { on: { 'player.removed': () => { order.push('handler'); } } } });
+    const t = testGame({ ...game, systems: [{ id: 'kick', run: sim => { if (sim.world.players.p1) { sim.ctx.removePlayer('p1'); order.push('after remove'); } } }] });
+    t.join('Ada');
+    t.tick();
+    expect(order).toEqual(['after remove', 'handler']);
+  });
+
+  test('act() runs code like a system: its events are handled right after', () => {
+    const t = testGame(makeGame());
+    const ada = t.join('Ada');
+    t.act(sim => sim.ctx.trigger('enemy.died', { by: ada }));
+    expect(t.player(ada).score).toBe(10);
+  });
+
+  test('bot ids come from the world counter (deterministic)', () => {
+    const game = { ...makeGame(), bot: () => ({}) };
+    expect(testGame(game).addBot()).toBe(testGame(game).addBot());
+  });
+
+  test('the game can declare commands by type too; a module may not take them over', () => {
+    const base = makeGame();
+    const t = testGame({ ...base, commands: { ping: (_id, _c, sim) => `pong ${sim.world.kills}` } });
+    const ada = t.join('Ada');
+    expect(t.command(ada, { type: 'ping' })).toBe('pong 0');
+    const registry = createRegistry<{ none: { id: string } }>({ '../features/thief/server.ts': { default: { commands: { ping: () => 'stolen' } } } }, { kinds: ['none'] });
+    expect(() => testGame({ ...base, features: registry, commands: { ping: () => 'pong' } })).toThrow(/already handled by the game/);
+  });
 });

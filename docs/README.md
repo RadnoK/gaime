@@ -9,18 +9,26 @@
 | [TEMPLATES.md](TEMPLATES.md) | the example games (`blank`, `starter`, `duel`) and which one to start from |
 | [NEW_GAME.md](NEW_GAME.md) | creating a game, early design decisions, a starting prompt for your AI |
 
+## The core guide
+
+| | |
+| --- | --- |
+| [SIMULATION.md](SIMULATION.md) | **read this first when writing game rules or modules**: the one clock, the event bus, modifiers, timers, systems, module commands, the `Sim` facade, isolation, what keeps a game standing under load, `testGame` |
+
+gaime does not decide what your game looks like or what players touch — lobby, HUD, scene, sounds and content are yours. What the framework guarantees is the mechanics underneath: a fixed-step clock, a deterministic event bus, persistent timers, ordered systems and module isolation, so a game stays consistent when many people add features to it and keeps running under heavy traffic.
+
 ## Guides
 
 | | |
 | --- | --- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | how the pieces fit: packages, the room, hot reload, one tick |
-| [SERVER.md](SERVER.md) | `defineGame`, the simulation, commands, requests, events, chat, bots, workers, persistence, admin |
-| [CLIENT.md](CLIENT.md) | `GameClient`, hot-reload-safe clients, controls, `GameUi`, Three.js helpers, effects, audio |
-| [KIT.md](KIT.md) | the gameplay kit: collision, projectiles, timers, rounds, turns, inventory, teams, randomness |
-| [MODULES.md](MODULES.md) | feature modules and the registry — how content is added without touching the core |
-| [COOKBOOK.md](COOKBOOK.md) | recipes: rounds, hitscan, projectiles, buffs, spawning, teams, turns, shops, hidden info, bots… |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | how the pieces fit: packages, the engine and the room, hot reload, one tick |
+| [SERVER.md](SERVER.md) | `defineGame`, `GameContext`, commands, requests, client events, chat, bots, workers, persistence, errors, admin |
+| [MODULES.md](MODULES.md) | feature modules and the registry — definitions plus `on` / `modify` / `systems` / `commands`, isolation |
+| [KIT.md](KIT.md) | the gameplay kit: collision, projectiles, cooldowns and statuses, rounds, turns, inventory, teams, randomness |
+| [COOKBOOK.md](COOKBOOK.md) | recipes: rounds, hitscan, projectiles, buffs as modifiers, spawning systems, delayed things with timers, rewards through events, module commands, teams, turns, shops, hidden info, bots… |
+| [CLIENT.md](CLIENT.md) | `GameClient`, hot-reload-safe clients, controls, and the optional, replaceable defaults: `GameUi`, Three.js helpers, effects, audio |
 | [PROTOCOL.md](PROTOCOL.md) | wire protocol, delta sync, network configuration, latency and load testing |
-| [TESTING.md](TESTING.md) | logic tests, bot-vs-bot, smoke, load, the browser checklist |
+| [TESTING.md](TESTING.md) | `testGame` (the whole engine without a network), `testContext`, bot-vs-bot, smoke, load, the browser checklist |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | the supervisor, live/release modes, Docker, systemd, rollback, operations |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | symptoms → causes → fixes |
 | [SKILLS.md](SKILLS.md) | the AI skills in `.claude/skills` and how to write new ones |
@@ -29,7 +37,7 @@
 
 | | |
 | --- | --- |
-| [reference/CONFIG.md](reference/CONFIG.md) | every option: `GameDefinition`, `NetworkConfig`, the Vite plugin, `GameClient`, environment variables, HTTP endpoints |
+| [reference/CONFIG.md](reference/CONFIG.md) | every option: `GameDefinition`, `GameContext`, module behaviour, engine limits, `NetworkConfig`, the Vite plugin, `GameClient`, environment variables, HTTP endpoints |
 | [reference/CLI.md](reference/CLI.md) | every `gaime` command and npm script |
 
 ## Per game

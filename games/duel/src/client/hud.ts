@@ -51,7 +51,8 @@ export class Hud {
     const turns = world.turns;
     if (world.match.phase === 'playing' && turns) {
       this.writer.text(this.turn, active === this.net.id ? 'YOUR TURN ' : `${world.players[active ?? '']?.name ?? '—'}'s turn `);
-      this.writer.text(this.clock, world.shotFired ? (world.retreatUntil ? 'retreat!' : 'shot in flight') : `${Math.ceil(turnTimeLeft(turns, world.time))} s`);
+      const left = `${Math.ceil(turnTimeLeft(turns, world.time))} s`;
+      this.writer.text(this.clock, world.turnPhase === 'flight' ? 'shot in flight' : world.turnPhase === 'retreat' ? `retreat! ${left}` : left);
     } else {
       this.writer.text(this.turn, world.match.phase.toUpperCase() + ' ');
       this.writer.text(this.clock, '');

@@ -11,6 +11,30 @@ export interface Definition {
 
 /** Any event map: event name → payload type. */
 export type EventMap = Record<string, any>;
+/** Modifier names → the data passed along with the value. */
+export type ModifierMap = Record<string, any>;
+/**
+ * A module's private event, `<module>:<event>` (e.g. `ola-bomb:fuse`): needs no entry in the
+ * game's shared `Events`, so modules never have to edit the game's types. Payload: any JSON.
+ */
+export type PrivateEvent = `${string}:${string}`;
+/**
+ * Events the engine itself triggers, for every game: players appearing, connecting, leaving.
+ * They are part of every game's bus (`on: { 'player.joined': … }`).
+ */
+export type EngineEvents = {
+  /** A new player (or bot) was created. */
+  'player.joined': { player: string; bot: boolean };
+  /** A player's connection came up (join, reconnect, bots on start). */
+  'player.online': { player: string };
+  /** A player's connection dropped; the character stays unless the game removes it. */
+  'player.offline': { player: string };
+  /** A player is being deleted from the world (kick, freed seat, `ctx.removePlayer`). */
+  'player.removed': { player: string; name: string };
+};
+
+/** Payload of `Name`: from the game's map, or `any` for a module's private event. */
+export type EventData<E extends EventMap, Name> = Name extends keyof E ? E[Name] : Name extends keyof EngineEvents ? EngineEvents[Name] : any;
 
 export type SystemPhase = 'input' | 'update' | 'late';
 
@@ -44,11 +68,11 @@ export type CommandHandler<S = any> = (playerId: string, command: { type: string
  * Engine-level behaviour any module (or the game itself) can contribute. Handlers receive the
  * game's `Sim` (from `GameDefinition.sim`), or the `GameContext` when the game defines none.
  */
-export interface Behaviour<S = any, E extends EventMap = EventMap> {
-  /** Event handlers: `{ 'enemy.died': (event, sim) => … }`. */
-  on?: { [Name in keyof E]?: EventHandler<E[Name], S> };
-  /** Value modifiers: `{ 'player.damage': (amount, event, sim) => amount * 0.8 }`. */
-  modify?: Record<string, Modifier<S>>;
+export interface Behaviour<S = any, E extends EventMap = EventMap, M extends ModifierMap = ModifierMap> {
+  /** Event handlers: `{ 'enemy.died': (event, sim) => … }`, plus private `'<module>:<event>'` ones. */
+  on?: { [Name in keyof E]?: EventHandler<E[Name], S> } & { [Name in keyof EngineEvents]?: EventHandler<EngineEvents[Name], S> } & { [Name in PrivateEvent]?: EventHandler<any, S> };
+  /** Value modifiers: `{ 'player.damage': (amount, data, sim) => amount * 0.8 }`. */
+  modify?: { [Name in keyof M]?: (value: any, data: M[Name], sim: S) => any };
   systems?: SystemDef<S>[];
   /** Client commands this module adds, by `type`. Types are global: prefix them with the module id. */
   commands?: Record<string, CommandHandler<S>>;
@@ -57,12 +81,12 @@ export interface Behaviour<S = any, E extends EventMap = EventMap> {
 /** Keys of a feature module that are not definition kinds. */
 export const RESERVED_KEYS = ['id', 'author', 'description', 'on', 'modify', 'systems', 'commands'] as const;
 
-export type FeatureModule<K extends Record<string, Definition>, S = any, E extends EventMap = EventMap> = {
+export type FeatureModule<K extends Record<string, Definition>, S = any, E extends EventMap = EventMap, M extends ModifierMap = ModifierMap> = {
   /** Defaults to the directory name. */
   id?: string;
   author?: string;
   description?: string;
-} & Behaviour<S, E> & { [Kind in keyof K]?: K[Kind][] };
+} & Behaviour<S, E, M> & { [Kind in keyof K]?: K[Kind][] };
 
 /** A behaviour contributed by one owner (`game` or a feature id). */
 export interface Owned<T> { owner: string; value: T }
@@ -114,7 +138,7 @@ function jsonSafe(value: unknown): unknown {
 }
 
 /** Validates and appends the `on` / `modify` / `systems` / `commands` of one owner. */
-export function collectBehaviour(target: Pick<Registry<any>, 'handlers' | 'modifiers' | 'systems' | 'commands'>, behaviour: Behaviour, owner: string, where = owner) {
+export function collectBehaviour(target: Pick<Registry<any>, 'handlers' | 'modifiers' | 'systems' | 'commands'>, behaviour: Behaviour<any, any, any>, owner: string, where = owner) {
   const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
   if (behaviour.on !== undefined) {
     if (!isRecord(behaviour.on)) throw new Error(`${where}: "on" must be an object of event handlers.`);
@@ -127,7 +151,7 @@ export function collectBehaviour(target: Pick<Registry<any>, 'handlers' | 'modif
     if (!isRecord(behaviour.modify)) throw new Error(`${where}: "modify" must be an object of modifiers.`);
     for (const [name, run] of Object.entries(behaviour.modify)) {
       if (typeof run !== 'function') throw new Error(`${where}: modify["${name}"] must be a function.`);
-      target.modifiers.push({ owner, value: { name, run } });
+      target.modifiers.push({ owner, value: { name, run: run as Modifier } });
     }
   }
   if (behaviour.systems !== undefined) {

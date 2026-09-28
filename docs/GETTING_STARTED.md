@@ -38,7 +38,12 @@ docs/               this documentation
 .claude/skills/     playbooks for AI agents (docs/SKILLS.md)
 ```
 
-A game is four folders: `src/shared` (types and rules used by both sides), `src/server` (the simulation), `src/client` (rendering and HUD), `src/features/*` (content modules). [ARCHITECTURE.md](ARCHITECTURE.md) explains how they fit together.
+A game is four folders: `src/shared` (types, events and rules used by both sides), `src/server` (the simulation), `src/client` (rendering and HUD), `src/features/*` (content and behaviour modules). [ARCHITECTURE.md](ARCHITECTURE.md) explains how they fit together.
+
+Every game runs on the same **simulation model** ([SIMULATION.md](SIMULATION.md)): one fixed-step clock (`world.time`), an event bus (`ctx.trigger` + `on` handlers), modifiers for numbers several modules adjust, persistent timers (`ctx.after`), and systems for per-tick and periodic work. Modules plug into those instead of into each other, which is what keeps a game consistent when many people add to it and keeps it standing under load. Read it before writing rules.
+
+What players see — lobby, HUD, scene, sounds — is up to each game. The templates use the framework's optional defaults (`GameUi`, the Three.js helpers, `SoundBank`) so they work out of the box; replace them whenever your game has its own look ([CLIENT.md](CLIENT.md)).
+
 
 ## 3. Make a change
 
@@ -49,7 +54,7 @@ Read AGENTS.md and games/starter/AGENTS.md. In games/starter/src/features/my-bee
 weak "Scuttler" enemy and a wave that sends 12 of them from wave 2. Use the gaime-feature skill.
 ```
 
-It is one new directory (`src/features/my-beetles/server.ts`); the game picks it up while running. Then:
+It is one new directory (`src/features/my-beetles/server.ts`); the game picks it up while running. A module can also add behaviour without new content — react to the game's events, adjust its values, run its own systems, add a command ([MODULES.md](MODULES.md)); `games/blank/src/features/combo/` is a ten-line example. Then:
 
 ```sh
 npm run check               # typecheck — the server runs this before deploying anything
@@ -80,17 +85,18 @@ From then on `git push` to `main` is the deploy: the server picks the commit up 
 
 - Everyone works on `main` with their own AI; content goes into their own `src/features/<name>-…` directories, so pushes rarely conflict.
 - `git pull --rebase && git push`. Never force-push.
-- Rules the AI must follow are in [AGENTS.md](../AGENTS.md) — the short version: the server is authoritative, all state lives in the plain-JSON world, ids are stable, check before you push.
+- Rules the AI must follow are in [AGENTS.md](../AGENTS.md) — the short version: the server is authoritative, all state lives in the plain-JSON world, modules talk through events, modifiers, timers and systems (never through each other's code), ids are stable, check before you push.
 
 ## Where next
 
 | I want to… | Read |
 | --- | --- |
 | understand the whole system | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| understand the simulation model (clock, events, modifiers, timers, systems) | [SIMULATION.md](SIMULATION.md) |
 | write game rules | [SERVER.md](SERVER.md), [KIT.md](KIT.md), [COOKBOOK.md](COOKBOOK.md) |
 | build the UI and 3D scene | [CLIENT.md](CLIENT.md) |
 | add content modules | [MODULES.md](MODULES.md) |
 | tune networking | [PROTOCOL.md](PROTOCOL.md) |
-| test | [TESTING.md](TESTING.md) |
+| test (`testGame`: the real engine without a network) | [TESTING.md](TESTING.md) |
 | fix something | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
 | look up an option | [reference/CONFIG.md](reference/CONFIG.md), [reference/CLI.md](reference/CLI.md) |

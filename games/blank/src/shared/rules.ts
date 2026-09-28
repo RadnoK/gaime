@@ -9,6 +9,8 @@ export const RULES = {
   pickupRadius: 0.6,
   maxPickups: 12,
   spawnEvery: 1.5,
+  /** Seconds a pickup stays before it disappears. */
+  pickupLife: 20,
 };
 
 export const FIELD = { x: -RULES.size / 2, z: -RULES.size / 2, width: RULES.size, depth: RULES.size };

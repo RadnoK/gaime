@@ -1,9 +1,11 @@
 import { dist } from '@gaime/core';
 import type { Feature } from '../../shared/types';
 
+const SLAM_RADIUS = 5;
+
 /**
- * Example of a boss with its own AI (`tick`), its own wave and a custom 3D model
- * (see client.ts in this directory: shape "golem").
+ * Example of a boss with a periodic module system (`every`), its own wave, a death hook
+ * and a custom 3D model (see client.ts in this directory: shape "golem").
  */
 export default {
   author: 'gaime',
@@ -14,18 +16,23 @@ export default {
     description: 'Slams the ground every 6 s: 30 damage to players within 5 m. Breaks into three beetles when it dies.',
     hp: 900, speed: 1.4, radius: 1.6, damage: 40, reward: 150,
     visual: { shape: 'golem', color: '#8f7bff', scale: 1.6 },
-    tick(sim, golem) {
-      const slamAt = Number(golem.data['golem-slam-at'] ?? sim.world.time + 6);
-      if (sim.world.time >= slamAt) {
-        sim.effect('pulse', golem, { radius: 5, color: '#8f7bff' });
-        for (const player of sim.players()) if (dist(golem, player) <= 5) sim.hurtPlayer(player, 30);
-        golem.data['golem-slam-at'] = sim.world.time + 6;
-      } else golem.data['golem-slam-at'] = slamAt;
-      sim.defaultAi(golem);
-    },
+    // No `tick`: the golem walks with the default AI; the slam is the system below.
     onDeath(sim, golem) {
       for (let i = 0; i < 3; i++) sim.spawn('beetle', { x: golem.x + (sim.random() - 0.5) * 3, z: golem.z + (sim.random() - 0.5) * 3 });
       sim.log('🪨 The golem crumbles!');
+    },
+  }],
+  systems: [{
+    // Runs every 6 s of game time (staggered against other periodic systems), not every tick.
+    id: 'slam',
+    every: 6,
+    run(sim) {
+      if (sim.world.phase !== 'fight') return;
+      for (const golem of sim.enemies()) {
+        if (golem.kind !== 'golem') continue;
+        sim.effect('pulse', golem, { radius: SLAM_RADIUS, color: '#8f7bff' });
+        for (const player of sim.players()) if (dist(golem, player) <= SLAM_RADIUS) sim.hurtPlayer(player, 30, 'golem');
+      }
     },
   }],
   waves: [{

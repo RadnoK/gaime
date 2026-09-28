@@ -1,43 +1,69 @@
 import { describe, expect, test } from 'vitest';
 import { seeded } from '@gaime/core';
-import { testContext } from '@gaime/core/server';
+import { testGame } from '@gaime/core/server';
+import { game } from '../src/server/game';
 import { registry } from '../src/server/registry';
-import { command, createPlayer, createWorld, prepareWorld, step } from '../src/server/simulation';
 import { RULES } from '../src/shared/rules';
 
-function setup() {
-  const world = createWorld();
-  const random = seeded(1);
-  const { ctx } = testContext(world, { random });
-  world.players.a = createPlayer(world, 'a', 'Ada', random);
-  world.hostId = 'a';
-  prepareWorld(world, registry);
-  const run = (seconds: number, input = { mx: 0, mz: 0 }) => {
-    for (let t = 0; t < seconds; t += 1 / 30) { world.time += 1 / 30; step(world, registry, { a: input }, 1 / 30, ctx); }
-  };
-  return { world, ctx, run };
-}
+// testGame runs the same engine as the server (clock, timers, events, systems, modules) without a network.
+const setup = () => testGame(game, { random: seeded(1) });
 
 describe('blank', () => {
   test('pickups spawn up to the limit and give points when touched', () => {
-    const { world, run } = setup();
-    run(RULES.spawnEvery * (RULES.maxPickups + 3));
-    expect(Object.keys(world.pickups).length).toBe(RULES.maxPickups);
-    const pickup = Object.values(world.pickups)[0];
-    Object.assign(world.players.a, { x: pickup.x, z: pickup.z });
-    run(0.05);
-    expect(world.pickups[pickup.id]).toBeUndefined();
-    expect(world.players.a.score).toBe(registry.kinds.pickups[pickup.kind].value);
+    const t = setup();
+    const ada = t.join('Ada');
+    t.run(RULES.spawnEvery * (RULES.maxPickups + 3));
+    expect(Object.keys(t.world.pickups).length).toBe(RULES.maxPickups);
+    const pickup = Object.values(t.world.pickups)[0];
+    Object.assign(t.player(ada), { x: pickup.x, z: pickup.z });
+    t.tick();
+    expect(t.world.pickups[pickup.id]).toBeUndefined();
+    expect(t.player(ada).score).toBe(registry.kinds.pickups[pickup.kind].value);
+    expect(t.events).toContainEqual({ name: 'pickup.collected', data: expect.objectContaining({ playerId: ada }) });
+  });
+
+  test('combo module: a second pickup within 2 s is worth double', () => {
+    const t = setup();
+    const ada = t.join('Ada');
+    const place = () => t.act(sim => sim.spawnPickup('coin', t.player(ada)));
+    place(); t.tick();
+    expect(t.player(ada).score).toBe(1);
+    place(); t.tick();
+    expect(t.player(ada).score).toBe(3);
+    t.run(2.5);
+    place(); t.tick();
+    expect(t.player(ada).score).toBe(4);
+  });
+
+  test('uncollected pickups expire (a timer saved in the world)', () => {
+    const t = setup();
+    t.join('Ada');
+    t.run(RULES.spawnEvery + 0.1);
+    const first = Object.keys(t.world.pickups)[0];
+    expect(t.ctx.timeLeft(`pickup:${first}`)).toBeGreaterThan(RULES.pickupLife - 1);
+    t.run(RULES.pickupLife);
+    expect(t.world.pickups[first]).toBeUndefined();
+    expect(t.triggeredOf('pickup.expired')).toContainEqual({ pickup: first });
   });
 
   test('players stay on the field; only the host resets scores', () => {
-    const { world, ctx, run } = setup();
-    run(10, { mx: 1, mz: 1 });
-    expect(world.players.a.x).toBeLessThanOrEqual(RULES.size / 2);
-    world.players.a.score = 7;
-    world.players.b = createPlayer(world, 'b', 'Bob');
-    expect(command(world, 'b', { type: 'reset-scores' }, ctx)).toMatch(/host/);
-    command(world, 'a', { type: 'reset-scores' }, ctx);
-    expect(world.players.a.score).toBe(0);
+    const t = setup();
+    const ada = t.join('Ada');
+    const bob = t.join('Bob');
+    t.input(ada, { mx: 1, mz: 1 });
+    t.run(10);
+    expect(t.player(ada).x).toBeLessThanOrEqual(RULES.size / 2);
+    t.player(ada).score = 7;
+    expect(t.command(bob, { type: 'reset-scores' })).toMatch(/host/);
+    t.command(ada, { type: 'reset-scores' });
+    expect(t.player(ada).score).toBe(0);
+  });
+
+  test('a bot collects pickups on its own', () => {
+    const t = setup();
+    t.join('Ada');
+    const bot = t.addBot();
+    t.run(20);
+    expect(t.player(bot).score).toBeGreaterThan(0);
   });
 });

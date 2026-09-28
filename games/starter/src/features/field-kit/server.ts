@@ -4,7 +4,7 @@ import { dist } from '@gaime/core';
 
 export default {
   author: 'gaime',
-  description: 'Starting abilities for Q/E.',
+  description: 'Starting abilities for Q/E, and a breather: clearing a wave restores 30 HP to everyone standing.',
   abilities: [
     {
       id: 'dash',
@@ -28,7 +28,7 @@ export default {
       cooldown: 9, color: '#b481ff', icon: '◎',
       cast(sim, player) {
         sim.effect('pulse', player, { radius: 6, color: '#b481ff' });
-        for (const enemy of sim.enemies()) if (dist(player, enemy) <= 6) sim.hurtEnemy(enemy, 80, player.id);
+        for (const enemy of sim.enemies()) if (dist(player, enemy) <= 6) sim.hurtEnemy(enemy, 80, player.id, 'pulse');
       },
     },
     {
@@ -42,4 +42,13 @@ export default {
       },
     },
   ],
+  // Example of `on`: react to a game event without touching the game's code.
+  on: {
+    'wave.cleared': (_event, sim) => {
+      for (const player of sim.players()) {
+        sim.heal(player, 30);
+        sim.effect('text', player, { text: '+30', color: '#59ffb0' });
+      }
+    },
+  },
 } satisfies Feature;

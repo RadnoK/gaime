@@ -3,7 +3,7 @@ import '@gaime/core/ui';
 import './style.css';
 import { Controls, GameClient, keep, Scope, TouchControls, WASD, watchVersion } from '@gaime/core/client';
 import { SoundBank, tones } from '@gaime/core/audio';
-import type { Command, Input, World } from '../shared/types';
+import type { Command, Events, Input, World } from '../shared/types';
 import { createModels } from './features';
 import { Hud } from './hud';
 import { Arena } from './scene';
@@ -54,11 +54,18 @@ const hud = scope.add(new Hud(app, net, {
 
 scope.add(net.on('welcome', welcome => { arena.localId = welcome.id; }));
 scope.add(net.on('world', world => { arena.update(world); hud.render(world); }));
+// Server bus events listed in `network.events` (batched per tick), plus `sim.emit('sound', { kind })` from modules.
+const cues: Partial<Record<string, string>> = { 'wave.started': 'wave', 'wave.cleared': 'cleared', 'round.lost': 'lost' };
 scope.add(net.on('event', (name, data) => {
-  if (name !== 'sound') return;
-  const kind = (data as { kind: string }).kind;
-  sounds.play(kind);
-  if (kind === 'down') { arena.rig.shake(0.5); controls.rumble(0.8, 200); }
+  if (name === 'player.downed') {
+    if ((data as Events['player.downed']).playerId !== net.id) return;
+    sounds.play('down');
+    arena.rig.shake(0.5);
+    controls.rumble(0.8, 200);
+    return;
+  }
+  const kind = name === 'sound' ? (data as { kind?: string })?.kind : cues[name];
+  if (kind) sounds.play(kind);
 }));
 if (net.world) { arena.localId = net.id; arena.update(net.world); hud.render(net.world); }
 

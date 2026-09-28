@@ -51,7 +51,7 @@ export async function load({ url, bots = 10, seconds = 20, rate = 20, input, cha
       stats.joined++; stats.joinMs.push(performance.now() - started);
       room.reconnection.enabled = false;
       for (const type of ['welcome', 'patch']) room.onMessage(type, message => { stats.patches++; stats.bytes += JSON.stringify(message).length; });
-      for (const type of ['event', 'response', 'notice', 'removed']) room.onMessage(type, () => {});
+      for (const type of ['event', 'events', 'response', 'notice', 'removed']) room.onMessage(type, () => {});
       room.onLeave(code => { if (Date.now() < deadline) { stats.dropped++; stats.errors.push(`bot-${index + 1}: disconnected (${code})`); } });
       if (nextInput) timers.push(setInterval(() => { if (room.connection.isOpen) { room.send('input', nextInput()); stats.sent++; } }, 1000 / rate));
       if (chat) timers.push(setInterval(() => { if (room.connection.isOpen && Math.random() < chat) { room.send('command', { type: '$chat', text: `ping ${Date.now()}` }); stats.sent++; } }, 1000));
@@ -86,13 +86,18 @@ export async function load({ url, bots = 10, seconds = 20, rate = 20, input, cha
       tickMsMax: max('tickMs'), publishMsMax: max('publishMs'), patchBytesMax: max('patchBytes'),
       eventLoopP99Max: Math.max(0, ...stats.server.map(s => s.eventLoopDelayMs?.p99 ?? 0)),
       memoryMbMax: Math.max(0, ...stats.server.map(s => s.memoryMb ?? 0)),
+      droppedMsMax: Math.max(0, ...stats.server.map(s => s.droppedMs ?? 0)),
+      engine: stats.server.at(-1)?.engine,
+      // Where the tick time went at the end of the test: systems, handlers and commands by module.
+      topParts: (stats.server.at(-1)?.parts ?? []).slice(0, 5),
     },
     errors: stats.errors.slice(0, 10),
   };
   console.log(JSON.stringify(report, null, 2));
   const tickRate = stats.server.find(s => s.tickRate > 0)?.tickRate ?? 30;
   const budget = 1000 / tickRate;
-  if (report.server.tickMsMax > budget) console.log(`⚠ Server tick exceeded its ${round(budget)} ms budget — the simulation cannot keep up (consider workers or a lower publish rate).`);
+  if (report.server.tickMsMax > budget) console.log(`⚠ Server tick exceeded its ${round(budget)} ms budget — the simulation cannot keep up (see server.topParts; consider workers or a lower publish rate).`);
+  if (report.server.droppedMsMax > 0) console.log(`⚠ The server dropped ${report.server.droppedMsMax} ms of game time: it fell more than 3 ticks behind.`);
   if (stats.failed || stats.dropped) process.exitCode = 1;
   return report;
 }

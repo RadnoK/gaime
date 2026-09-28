@@ -66,7 +66,7 @@ function makeTicket() {
  * (network drops, server hot reloads and restarts), delta patches, throttled input,
  * RPC requests, server events and optional network simulation.
  */
-export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends { type: string } = { type: string }> {
+export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends { type: string } = { type: string }, E extends Record<string, any> = Record<string, any>> {
   id = '';
   world?: W;
   state: ConnectionState = 'idle';
@@ -115,6 +115,16 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
   on<K extends keyof Events<W>>(event: K, listener: Events<W>[K]): () => void {
     this.listeners[event].add(listener);
     return () => this.listeners[event].delete(listener);
+  }
+
+  /**
+   * One server event by name, typed by the game's `Events` (bus events listed in
+   * `network.events`, and `ctx.emit` names you add to that type).
+   *
+   *   net.onEvent('pickup.collected', ({ playerId }) => { if (playerId === net.id) sounds.play('collect'); });
+   */
+  onEvent<K extends keyof E & string>(name: K, listener: (data: E[K]) => void): () => void {
+    return this.on('event', (event, data) => { if (event === name) listener(data as E[K]); });
   }
 
   /** Detach every listener (used when a hot-reloaded module takes over this connection). */
@@ -325,8 +335,11 @@ export class GameClient<W extends BaseWorld = BaseWorld, I = unknown, C extends 
     this.transmit('input', next);
   }
 
-  /** Discrete action. Returns false when offline. */
-  command(command: C | EngineCommand): boolean {
+  /**
+   * Discrete action. Returns false when offline. Module commands are named `<module>-<action>`
+   * and are not part of the game's `Command` type: they are accepted as `{ type: 'mod-x', … }`.
+   */
+  command(command: C | EngineCommand | { type: `${string}-${string}`; [key: string]: unknown }): boolean {
     if (!this.connected || !this.room) return false;
     this.transmit('command', command);
     return true;

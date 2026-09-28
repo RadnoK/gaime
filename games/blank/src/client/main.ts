@@ -2,14 +2,15 @@
 import { GameUi, h } from '@gaime/core/ui';
 import './style.css';
 import { Controls, GameClient, keep, Scope, TouchControls, WASD, watchVersion } from '@gaime/core/client';
-import type { Command, Input, Player, World } from '../shared/types';
+import { SoundBank, tones } from '@gaime/core/audio';
+import type { Command, Events, Input, Player, World } from '../shared/types';
 import { Scene } from './scene';
 
 const app = document.getElementById('app')!;
 const scope = new Scope();
 
 // One connection for the whole page life; hot reloads of this module keep it.
-const net = keep(import.meta.hot, 'net', () => new GameClient<World, Input, Command>({ game: 'blank' }));
+const net = keep(import.meta.hot, 'net', () => new GameClient<World, Input, Command, Events>({ game: 'blank' }));
 net.off();
 
 const surface = h('div', { class: 'stage' });
@@ -30,6 +31,10 @@ const ui = scope.add(new GameUi<World>({
 }));
 const score = h('b', {}, '0');
 ui.top.append(h('div', {}, h('span', { class: 'g-micro' }, 'SCORE '), score));
+
+// Server bus events listed in `network.events` arrive here (batched per tick).
+const sounds = scope.add(new SoundBank({ sounds: { collect: tones([[880, 0.05], [1320, 0.08]]) } }));
+scope.add(net.onEvent('pickup.collected', ({ playerId }) => { if (playerId === net.id) sounds.play('collect'); }));
 
 scope.add(net.on('welcome', welcome => { scene.meId = welcome.id; }));
 scope.add(net.on('world', world => {

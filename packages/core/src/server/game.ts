@@ -1,11 +1,11 @@
 import type { Application } from 'express';
 import type { BaseWorld, PlayerOf } from '../shared/types';
 import type { NetworkConfig } from '../shared/net';
-import type { Behaviour, EventMap, Registry } from '../shared/registry';
+import type { Behaviour, EngineEvents, EventMap, ModifierMap, PrivateEvent, Registry } from '../shared/registry';
 import type { TimerOptions } from '../shared/schedule';
 
 /** Engine services available to game code during `step`, `command` and hooks. */
-export interface GameContext<W extends BaseWorld, E extends EventMap = EventMap> {
+export interface GameContext<W extends BaseWorld, E extends EventMap = EventMap, M extends ModifierMap = ModifierMap> {
   readonly world: W;
   /**
    * Put an event on the bus. Handlers (`on` of the game and of every module) run after the
@@ -13,12 +13,17 @@ export interface GameContext<W extends BaseWorld, E extends EventMap = EventMap>
    * must be plain JSON when the event is scheduled or forwarded to clients.
    */
   trigger<Name extends keyof E & string>(event: Name, data: E[Name]): void;
+  trigger<Name extends keyof EngineEvents>(event: Name, data: EngineEvents[Name]): void;
+  /** A module's private event `<module>:<event>` (no declaration needed). */
+  trigger(event: PrivateEvent, data?: unknown): void;
   /** Pass `value` through every `modify[name]` of the game and the modules, in order. */
-  modify<T>(name: string, value: T, data?: unknown): T;
+  modify<T, Name extends keyof M & string = keyof M & string>(name: Name, value: T, data?: M[Name]): T;
   /** Fire `event` after `seconds` of world time (pauses stop it). Returns the timer key. */
   after<Name extends keyof E & string>(seconds: number, event: Name, data?: E[Name], options?: { key?: string }): string;
+  after(seconds: number, event: PrivateEvent, data?: unknown, options?: { key?: string }): string;
   /** Fire `event` every `seconds` (first after `seconds`). Same key + event + interval → the running timer is kept. */
   every<Name extends keyof E & string>(seconds: number, event: Name, data?: E[Name], options?: Omit<TimerOptions, 'every'>): string;
+  every(seconds: number, event: PrivateEvent, data?: unknown, options?: Omit<TimerOptions, 'every'>): string;
   /** Cancel a timer by key; with `prefix: true` every timer whose key starts with it. Returns how many. */
   cancel(key: string, options?: { prefix?: boolean }): number;
   /** Seconds until the timer with this key fires, or undefined. */
@@ -87,7 +92,7 @@ export interface AdminCommand<W extends BaseWorld> {
 
 export type RequestHandler<W extends BaseWorld> = (world: W, playerId: string, payload: unknown, ctx: GameContext<W>) => unknown | Promise<unknown>;
 
-export interface GameDefinition<W extends BaseWorld, I = unknown, S = any, E extends EventMap = EventMap> extends Behaviour<S, E> {
+export interface GameDefinition<W extends BaseWorld, I = unknown, S = any, E extends EventMap = EventMap, M extends ModifierMap = ModifierMap> extends Behaviour<S, E, M> {
   /** Room name, checkpoint name and browser storage prefix. Lowercase, stable. */
   name: string;
   /** Maximum players online at once. Default: unlimited. */
@@ -117,12 +122,12 @@ export interface GameDefinition<W extends BaseWorld, I = unknown, S = any, E ext
    */
   migrate?(world: W): W;
   /** Called after load, after every hot reload and on first start (e.g. refresh the catalog). */
-  prepare?(world: W, ctx: GameContext<W, E>): void;
+  prepare?(world: W, ctx: GameContext<W, E, M>): void;
 
-  createPlayer(world: W, id: string, name: string, ctx: GameContext<W, E>): PlayerOf<W>;
-  onPlayerOnline?(world: W, player: PlayerOf<W>, online: boolean, ctx: GameContext<W, E>): void;
+  createPlayer(world: W, id: string, name: string, ctx: GameContext<W, E, M>): PlayerOf<W>;
+  onPlayerOnline?(world: W, player: PlayerOf<W>, online: boolean, ctx: GameContext<W, E, M>): void;
   /** The player is about to be deleted from the world. */
-  onPlayerRemoved?(world: W, player: PlayerOf<W>, ctx: GameContext<W, E>): void;
+  onPlayerRemoved?(world: W, player: PlayerOf<W>, ctx: GameContext<W, E, M>): void;
 
   /**
    * What one player may see: return a copy of `world` without other players' secrets
@@ -137,7 +142,7 @@ export interface GameDefinition<W extends BaseWorld, I = unknown, S = any, E ext
    * Advance the simulation by one tick (`dt` = 1 / tickRate seconds). Not called while paused.
    * Runs after the `input` systems and before the `update` systems.
    */
-  step?(world: W, inputs: Readonly<Record<string, I>>, dt: number, ctx: GameContext<W, E>): void;
+  step?(world: W, inputs: Readonly<Record<string, I>>, dt: number, ctx: GameContext<W, E, M>, sim: S): void;
   /**
    * The module registry: its modules' `on`, `modify`, `systems` and `commands` run in the engine
    * (after the game's own), isolated per module.
@@ -147,15 +152,15 @@ export interface GameDefinition<W extends BaseWorld, I = unknown, S = any, E ext
    * Builds what handlers, systems and module commands receive (the game's `Sim` facade).
    * Called once per tick and per command. Default: the `GameContext` itself.
    */
-  sim?(ctx: GameContext<W, E>, dt: number): S;
+  sim?(ctx: GameContext<W, E, M>, dt: number): S;
   /** Discrete player actions. Return a string to send it back to the player as a notice. */
-  command?(world: W, playerId: string, command: { type: string; [key: string]: unknown }, ctx: GameContext<W, E>): string | void;
+  command?(world: W, playerId: string, command: { type: string; [key: string]: unknown }, ctx: GameContext<W, E, M>): string | void;
 
   /**
    * Brain of bot players: called every tick for each bot, returns its input (like a client would send).
    * Discrete actions: `ctx.command(botId, {...})`. Enables `/bot` and `/bot remove` in chat (host only).
    */
-  bot?(world: W, botId: string, ctx: GameContext<W, E>): I | undefined;
+  bot?(world: W, botId: string, ctx: GameContext<W, E, M>): I | undefined;
   /** RPC: `client.request(name, payload)` resolves with the returned value (or rejects with a thrown error). */
   requests?: Record<string, RequestHandler<W>>;
   /** Chat: extra slash commands (`/name args`) and an optional filter (return null to drop a message). */
@@ -169,7 +174,7 @@ export interface GameDefinition<W extends BaseWorld, I = unknown, S = any, E ext
   routes?(app: Application): void;
 }
 
-export function defineGame<W extends BaseWorld, I, S = any, E extends EventMap = EventMap>(game: GameDefinition<W, I, S, E>): GameDefinition<W, I, S, E> {
+export function defineGame<W extends BaseWorld, I, S = any, E extends EventMap = EventMap, M extends ModifierMap = ModifierMap>(game: GameDefinition<W, I, S, E, M>): GameDefinition<W, I, S, E, M> {
   if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(game.name)) throw new Error(`Invalid game name "${game.name}" (lowercase letters, digits, dashes).`);
   return game;
 }

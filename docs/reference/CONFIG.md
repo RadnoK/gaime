@@ -2,17 +2,20 @@
 
 This page lists every configuration surface of a gaime game:
 
-- the game definition,
+- the game definition and `GameContext`,
+- module behaviour (`on`, `modify`, `systems`, `commands`) and the engine's limits,
 - the network settings,
 - the Vite plugin,
 - the browser client,
 - the environment of the supervisor, the game server and the Docker deployment,
 - join options and HTTP endpoints.
 
-For the concepts behind these settings, see [ARCHITECTURE.md](../ARCHITECTURE.md), [SERVER.md](../SERVER.md), [PROTOCOL.md](../PROTOCOL.md), [CLIENT.md](../CLIENT.md) and [DEPLOYMENT.md](../DEPLOYMENT.md). Gameplay helpers are in [KIT.md](../KIT.md).
+For the concepts behind these settings, see [SIMULATION.md](../SIMULATION.md), [ARCHITECTURE.md](../ARCHITECTURE.md), [SERVER.md](../SERVER.md), [PROTOCOL.md](../PROTOCOL.md), [CLIENT.md](../CLIENT.md) and [DEPLOYMENT.md](../DEPLOYMENT.md). Gameplay helpers are in [KIT.md](../KIT.md).
 
 - [GameDefinition](#gamedefinition)
 - [GameContext](#gamecontext)
+- [Module behaviour](#module-behaviour)
+- [Engine limits](#engine-limits)
 - [ChatCommand, AdminCommand, RequestHandler](#chatcommand-admincommand-requesthandler)
 - [NetworkConfig](#networkconfig)
 - [Vite plugin `gaime()`](#vite-plugin-gaime)
@@ -25,18 +28,18 @@ For the concepts behind these settings, see [ARCHITECTURE.md](../ARCHITECTURE.md
 
 ## GameDefinition
 
-`defineGame<W, I>(game: GameDefinition<W, I>)` from `@gaime/core/server`. `W` is your world type (extends `BaseWorld`), `I` is the parsed input type. `defineGame` validates `name` and returns the definition unchanged. The server entry exports `server = createGameServer(game)`.
+`defineGame<W, I, S, E, M>(game: GameDefinition<W, I, S, E, M>)` from `@gaime/core/server`. `W` is your world type (extends `BaseWorld`), `I` is the parsed input type, `S` is what handlers, systems, module commands and `step` receive (your `Sim`; default: the `GameContext`), `E` is your event map (`Events`: name → payload), which types `ctx.trigger`, `on` and timers, and `M` is your modifier map (`Modifiers`: name → data), which types `ctx.modify` and `modify`. Modules use the same maps: `FeatureModule<Kinds, Sim, Events, Modifiers>`. `defineGame` validates `name` and returns the definition unchanged. The server entry exports `server = createGameServer(game)`.
 
 ### Settings
 
-Defaults are applied in `packages/core/src/server/room.ts`.
+Defaults are applied in `packages/core/src/server/room.ts` and `engine.ts`.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `name` | `string` | required | Room name, checkpoint owner (a checkpoint of another game is refused) and browser storage prefix. Must match `/^[a-z0-9][a-z0-9-]{0,40}$/`. Keep it stable. |
 | `maxPlayers` | `number` | unlimited | Maximum number of human players. With `keepPlayers: true` it counts players **online**. With `false` it counts every seat, and a player who already holds a seat can always come back. Bots are not counted. A rejected join gets HTTP 403 "The game is full". |
 | `keepPlayers` | `boolean` | `true` | `true`: a character stays in the world after its player leaves, and returns with the same browser identity. `false`: leaving frees the seat (duels, board games). After a process restart, offline seats are kept for 60 s, then freed. |
-| `tickRate` | `number` | `30` | Simulation ticks per second. `dt` passed to `step` is capped at 0.1 s. |
+| `tickRate` | `number` | `30` | Simulation ticks per second. The clock is a fixed step: every tick advances `world.time` by exactly `1 / tickRate` s and `dt` is always that value (periodic systems get the time since their last run). A slow server catches up at most 3 ticks at once (see [Engine limits](#engine-limits)). |
 | `publishEvery` | `number` | `2` | Publish a network patch every N ticks (15 Hz at 30 ticks). Minimum 1. Commands and joins publish on the next tick regardless. |
 | `reconnectSeconds` | `number` | `30` | Seconds a dropped connection keeps its session for an automatic reconnect. |
 | `inputLeaseMs` | `number` | `400` | Continuous input older than this is dropped, so the player stops. The client repeats unchanged input every 150 ms to keep the lease. |
@@ -50,31 +53,48 @@ Defaults are applied in `packages/core/src/server/room.ts`.
 | `createWorld` | `() => W` | A fresh world. Spread `baseWorld(SCHEMA)` into it. It is also used to fill fields missing from older saves. |
 | `migrate?` | `(world: W) => W` | Upgrades an older world (checkpoint or hot-reload cache) in place. Missing fields are already filled from `createWorld()` and `createPlayer()`. Throw to refuse an incompatible save: the game pauses and the file is never deleted. |
 | `prepare?` | `(world: W, ctx) => void` | Called on first start, after every load and after every hot reload (refresh catalogs, drop entities of removed features). |
-| `createPlayer` | `(world: W, id: string, name: string, ctx) => Player` | Builds a new player. It is called on a first join, by `ctx.addBot`, and once per load with id `'template'` on a scratch world, to learn the default player fields. That template call gets a sandboxed `ctx`: `log`, `notify`, `emit`, `save`, `job`, `removePlayer` and `command` do nothing, `findPlayer` finds nothing, and `addBot` throws. Keep it free of side effects. The `name` it receives is already unique (see [Join options](#join-options)). |
+| `createPlayer` | `(world: W, id: string, name: string, ctx) => Player` | Builds a new player. It is called on a first join, by `ctx.addBot`, and once per load with id `'template'` on a scratch world, to learn the default player fields. That template call runs on a scratch engine and a scratch world whose effects are thrown away (`notify` and `emit` go nowhere, `log`, `trigger` and timers touch only the scratch world), and `addBot` throws. Keep it free of side effects. The `name` it receives is already unique (see [Join options](#join-options)). |
 | `onPlayerOnline?` | `(world, player, online: boolean, ctx) => void` | A player connected or disconnected (also bots and reconnects). |
 | `onPlayerRemoved?` | `(world, player, ctx) => void` | The player is about to be deleted from the world. |
 | `parseInput` | `(raw: unknown) => I \| undefined` | Validates and normalises raw client input. Return `undefined` to ignore it. Exceptions are logged and the input is ignored. |
-| `step` | `(world, inputs: Readonly<Record<string, I>>, dt: number, ctx) => void` | Advances the simulation. It is not called while paused. An exception pauses the game (`pause.reason = 'error'`) until new code is loaded or the host resumes. |
-| `command?` | `(world, playerId, command: { type: string, … }, ctx) => string \| void` | Discrete player actions. A returned string is sent to the player as a notice. An exception becomes a notice instead of crashing. Types starting with `$` are reserved for the engine (`$chat`, `$pause`, `$resume`). |
+| `step?` | `(world, inputs: Readonly<Record<string, I>>, dt: number, ctx, sim: S) => void` | Per-tick input handling. Runs after the `input` systems and before the `update` systems; not called while paused. `inputs` holds humans' inputs within the lease plus bots' inputs. An exception pauses the game (`pause.reason = 'error'`) until new code is loaded or the host resumes. Optional: a game can do everything in systems. |
+| `features?` | the registry (`Pick<Registry, 'handlers' \| 'modifiers' \| 'systems' \| 'commands'>`) | Pass `registry`: the modules' `on`, `modify`, `systems` and `commands` then run in the engine, after the game's own, isolated per module. Without it, modules contribute definitions only. |
+| `sim?` | `(ctx, dt: number) => S` | Builds the object handlers, modifiers, systems and module commands receive, and `step` gets as its fifth argument (the game's `Sim` facade). Built at most once per tick and `dt` (cached); commands get `dt` 0. Default: the `GameContext`. |
+| `systems?` | `SystemDef<S>[]` | The game's own systems, run before modules' systems in each phase. See [Module behaviour](#module-behaviour). |
+| `on?` | `{ [event]: (data, sim) => void }` | The game's event handlers, run before modules' handlers. |
+| `modify?` | `{ [name]: (value, data, sim) => value }` | The game's modifiers, run before modules' modifiers. |
+| `command?` | `(world, playerId, command: { type: string, … }, ctx) => string \| void` | Discrete player actions whose `type` no `commands` entry (the game's or a module's) claimed. A returned string is sent to the player as a notice. An exception becomes a notice instead of crashing. Types starting with `$` are reserved for the engine (`$chat`, `$pause`, `$resume`). |
 | `bot?` | `(world, botId, ctx) => I \| undefined` | Brain of bot players, called every tick (not while paused). It returns an input like a client would send. Discrete actions go through `ctx.command(botId, …)`. Defining it enables `/bot` in chat and `ctx.addBot`. |
 | `requests?` | `Record<string, RequestHandler<W>>` | RPC endpoints for `client.request(name, payload)`. |
 | `chat?` | `{ commands?: Record<string, ChatCommand<W>>; filter?(text, player): string \| null }` | Extra slash commands, and a filter for plain chat messages (return `null` to drop a message). |
 | `admin?` | `Record<string, AdminCommand<W>>` | Operator commands for `gaime admin <name>` (admin token required). |
 | `routes?` | `(app: express.Application) => void` | Extra HTTP routes on the game server. Registered once: changes need a process restart. |
 
+`GameDefinition` extends the same `Behaviour` type as modules, so the game may also declare `commands` (by type, receiving the `Sim`); they are checked before module commands, and a module claiming the same type is rejected at startup. `command` remains the catch-all for everything else.
+
+Errors in the game's own `step`, `systems`, `on`, `modify`, `bot`, `prepare`, `onPlayerOnline`, `onPlayerRemoved` and job callbacks pause the game. Errors in module code switch the module off — see [SERVER.md](../SERVER.md#errors).
+
 ```ts
-export const game = defineGame<World, Input>({
-  name: 'duel',
-  maxPlayers: 2,
-  keepPlayers: false,
-  network: { entities: ['players', 'projectiles'], streams: ['feed', 'effects'], shared: ['catalog'], precision: { aim: 1, hp: 1 } },
+// games/blank/src/server/game.ts (shortened)
+export const game = defineGame<World, Input, Sim, Events, Modifiers>({
+  name: 'blank',
+  network: { entities: ['players', 'pickups'], shared: ['catalog'], events: ['pickup.collected'] },
+  features: registry,
+  sim: (ctx, dt) => makeSim(registry, ctx, dt),
   createWorld, createPlayer, parseInput, step, command,
+  prepare: world => prepareWorld(world, registry),
+  systems: [
+    { id: 'collect', run: sim => collect(sim, registry) },
+    { id: 'spawn', every: RULES.spawnEvery, run: spawn },
+  ],
+  on: { 'pickup.expired': ({ pickup }, sim) => { delete sim.world.pickups[pickup]; } },
+  bot: botInput,
 });
 ```
 
 ## GameContext
 
-`ctx` is passed to every hook. On the server it is backed by the room. `testContext(world, { random?, command? })` from `@gaime/core/server` builds one for unit tests.
+`ctx` is passed to every hook. On the server it is backed by the `Engine` (`packages/core/src/server/engine.ts`), which the room drives. `testGame(game)` runs the same engine in tests; `testContext(world, { random?, command? })` builds a bare one for unit tests ([TESTING.md](../TESTING.md)).
 
 | Member | Meaning |
 | --- | --- |
@@ -89,9 +109,71 @@ export const game = defineGame<World, Input>({
 | `emit(name, data?, playerId?)` | A one-off `event` message to everyone or to one player (sounds, screen shake). It is not stored in the world. |
 | `job(promise, apply, fail?)` | Applies the result of asynchronous work on a later tick, inside the simulation. Pending jobs are dropped by a hot reload. |
 | `findPlayer(nameOrId)` | Lookup by id, then by case-insensitive exact name, then by a unique name prefix. |
-| `addBot(name?): string` | Adds a server-driven player (requires `GameDefinition.bot`, otherwise it throws). Id `bot-xxxxxxxx`, default name `Bot N`. A name another player already uses becomes `Name 2`, `Name 3`… |
+| `addBot(name?): string` | Adds a server-driven player (requires `GameDefinition.bot`, otherwise it throws). Id `bot-<n>` from the world's id counter (deterministic in seeded tests), default name `Bot N`. A name another player already uses becomes `Name 2`, `Name 3`… |
 | `isBot(playerId)` | True for players created by `addBot`. |
-| `command(playerId, command)` | Runs `GameDefinition.command` as if `playerId` sent it, and returns its reply. Engine `$` commands are not handled. It never throws: an exception is logged and returned as the reply `Error in the code of command "<type>": <message>`, and the game is not paused. |
+| `command(playerId, command)` | Runs a command as if `playerId` sent it — a module's `commands[type]`, else `GameDefinition.command` — and returns its reply. `$chat`, `$pause` and `$resume` are handled like the client's. It never throws: an exception is logged and returned as the reply `Error in the code of command "<type>": <message>`, and the game is not paused. |
+| `trigger(event, data)` | Queues a bus event: one of the game's `Events`, an engine event (below), or a module-private `<module>:<event>` (any payload, no declaration needed). Handlers (`on` of the game, then of each module in file order) run after the current piece of code — a system, `step`, a command, a timer batch — in the same tick, FIFO. Payloads should be plain JSON (they are when scheduled or forwarded). Events in `network.events` also go to clients. |
+| `modify<T>(name, value, data?): T` | `name` is one of the game's `Modifiers`. Passes `value` through every `modify[name]` of the game and the modules, in order; each gets the previous result; `undefined` keeps it. A throwing modifier is skipped and its module switched off. |
+| `after(seconds, event, data?, { key? }): string` | Schedules `event` (a game event or a private `<module>:<event>`) once, `seconds` of world time from now (pauses stop it). Returns the key (`#<n>` when none was given). Scheduling an existing key replaces that timer. |
+| `every(seconds, event, data?, { key?, times? }): string` | Schedules `event` every `seconds`, first after `seconds`; `times` stops it after that many firings. Calling it again with the same key, event and interval keeps the running timer (safe in `prepare`). A timer that missed intervals fires once and continues a full interval later. |
+| `cancel(key, { prefix? }): number` | Cancels the timer with this key, or with `prefix: true` every timer whose key starts with it. Returns how many were cancelled. |
+| `timeLeft(key): number \| undefined` | Seconds until that timer fires, or `undefined` when there is none. |
+| `timers(prefix?): number` | Number of live timers, optionally only those whose key starts with `prefix`. |
+| `isolate<T>(owner, run): T \| undefined` | Runs `run` as code of module `owner`: an exception switches that module off (feed, `/health` → `disabled`) instead of pausing the game. Returns `undefined` when it threw or the module is already off. Owner `'game'` behaves like game code (an exception pauses). Use it for definition hooks: `ctx.isolate(registry.owner['pickups/' + def.id], () => def.onPickup(...))`. |
+| `disabled(owner): boolean` | Whether module `owner` is switched off after an error (until the next code load). |
+
+Timers keyed `player:<id>:…` are cancelled when that player is removed. Keys are the only handle on a timer — prefix them with their owner (`bomb:<id>`, `ola-swamp:<enemy>:burn`).
+
+### Engine events
+
+Triggered by the engine on every game's bus (`EngineEvents` in `@gaime/core`); react with `on` in the game or any module:
+
+| Event | Payload | When |
+| --- | --- | --- |
+| `player.joined` | `{ player: string; bot: boolean }` | a new player or bot was created (after `createPlayer`) |
+| `player.online` | `{ player: string }` | a connection came up: join, reconnect, a bot added (after `onPlayerOnline`) |
+| `player.offline` | `{ player: string }` | a connection dropped; the character stays unless the game removes it |
+| `player.removed` | `{ player: string; name: string }` | the player is being deleted: kick, freed seat, `ctx.removePlayer` (after `onPlayerRemoved`, before the player and its `player:<id>:` timers are gone — handlers run after that, so look the player up defensively) |
+
+---
+
+## Module behaviour
+
+The `Behaviour` part of a feature module (`FeatureModule<Kinds, Sim, Events, Modifiers>` from `@gaime/core`), also accepted by `GameDefinition` for `on`, `modify` and `systems`. Validated by `createRegistry` (modules) and by the engine (the game); a violation fails the server code load with the file name.
+
+| Key | Type | Rules |
+| --- | --- | --- |
+| `on` | `{ [event]: (data, sim) => void }` | an object of functions; keys are the game's `Events`, engine events, or private `<module>:<event>` names |
+| `modify` | `{ [name]: (value, data, sim) => any }` | an object of functions; keys are the game's `Modifiers` |
+| `systems` | `SystemDef<S>[]` | an array; ids unique within the owner |
+| `commands` | `{ [type]: (playerId, command, sim) => string \| void }` | the game or a module; each type has one handler (the game's first, a duplicate fails at startup); types starting with `$` are refused |
+
+Reserved module keys (never definition kinds): `id`, `author`, `description`, `on`, `modify`, `systems`, `commands`.
+
+`SystemDef<S>`:
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `id` | `string` | required | `^[a-z0-9][a-z0-9-]{0,63}$`, unique within its module. Shown in `/gaime/stats` → `parts` as `<owner>/<id>` (`game/spawn`, `combo/…`). |
+| `phase` | `'input' \| 'update' \| 'late'` | `'update'` | Order within a tick: `input` → the game's `step` → `update` → `late`. Within a phase: the game's systems, then modules' in file order, each in declaration order. |
+| `every` | `number` (seconds, > 0) | every tick | Run at most every N seconds of world time; `dt` is then the time since the last run. Systems are staggered by a hash of their name, so equal intervals do not land on the same tick. The schedule restarts (staggered) after every code load. |
+| `run` | `(sim: S, dt: number) => void` | required | The work. Not called while paused or after its module was switched off. |
+
+Handlers, modifiers and systems of a switched-off module are skipped; its commands answer `"<type>" is switched off after an error in module <id>.` An exception inside a module command becomes an error reply to that player and does not switch the module off.
+
+## Engine limits
+
+Constants in `packages/core/src/server/engine.ts` and `room.ts`. They are not configurable per game; they exist so a bug or a traffic spike degrades one part of the game instead of stopping it.
+
+| Limit | Value | What happens when it is reached |
+| --- | --- | --- |
+| Events per dispatch cycle (`MAX_EVENTS_PER_TICK`) | 50 000 | An event storm: `trigger` throws in the code that raised the event and the queue is dropped. A module is switched off; game code pauses the game. Usually a handler triggering the event it handles. |
+| Timers fired per tick (`MAX_TIMERS_PER_TICK`) | 5 000 | The rest fire on the following ticks (in time order); `engine.deferredTimers` in `/gaime/stats` counts such ticks. |
+| Clock catch-up (`MAX_CATCH_UP`) | 3 ticks | After a slow tick the room runs up to 3 steps at once; beyond that the simulated time is dropped (the game slows down briefly) and added to `droppedMs`. |
+| Client events per client per tick (`MAX_EVENTS_PER_CLIENT`) | 256 | Extra events are not sent; counted in `engine.droppedEvents`. |
+| Send buffer (backpressure) | 64 KB | A client whose socket buffer exceeds it is skipped for patches until it drains. |
+| Checkpoint interval | ~2 s | While time moves or something changed; also before a hot reload and on shutdown. |
+| Feed length | 40 items | Older items are dropped. |
 
 ## ChatCommand, AdminCommand, RequestHandler
 
@@ -126,8 +208,9 @@ This is `GameDefinition.network`, defined in `packages/core/src/shared/net.ts`. 
 | `entities` | `string[]` | `['players']` | Top-level `Record<id, object>` dictionaries, diffed per entity and per field. |
 | `streams` | `string[]` | `['feed']` | Top-level arrays of immutable `{ id }` objects, sent as add/remove. |
 | `precision` | `Record<string, number>` | `DEFAULT_PRECISION` | Field name → rounding factor for the network copy only (100 → 0.01). It is merged over the defaults and applies to that field name at any depth. A factor of `0` disables rounding for a field. |
-| `hidden` | `string[]` | `[]` | Top-level keys that never leave the server. They are still saved in checkpoints. |
+| `hidden` | `string[]` | `[]` | Top-level keys that never leave the server. They are still saved in checkpoints. `schedule` (the engine's timers) is always hidden, whatever you list. |
 | `shared` | `string[]` | `[]` | Top-level keys that are replaced wholesale and never mutated (catalogs). They are compared by reference, sent when the reference changes, and **not stored in checkpoints** (rebuild them in `prepare`). |
+| `events` | `string[]` | `[]` | Bus events (`ctx.trigger`) that are also delivered to every client, with their payload, as client events (`net.on('event')`), batched per tick. For sounds and effects. See [PROTOCOL.md](../PROTOCOL.md#client-events). |
 
 `entities` and `streams` **replace** their defaults, so keep `'players'` and `'feed'` in them.
 
@@ -296,12 +379,13 @@ Only the variables listed in `compose.yml` reach the container. It passes throug
 
 ## Join options
 
-These are the options a client passes to `joinById(roomId, options)`. `GameClient` sends `name` and `ticket` automatically.
+These are the options a client passes to `joinById(roomId, options)`. `GameClient` sends `name`, `ticket` and `protocol` automatically.
 
 | Option | Type | Meaning |
 | --- | --- | --- |
 | `ticket` | `string` | **Required.** A private, persistent browser identity matching `/^[A-Za-z0-9_-]{16,64}$/` (`GameClient`: 18 random bytes, base64url). The same ticket always maps to the same player. A second connection with the same ticket takes over the character, and the older one is closed with "The game was opened in another tab". A missing or invalid ticket gets HTTP 400. |
 | `name` | `string` | Display name. Whitespace is collapsed and trimmed, and the name is cut to 24 characters. Empty means `Player N`. A new player whose name is already taken (case-insensitive) gets `Name 2`, `Name 3`… For an existing player, a different name renames them, unless another player uses it: then they keep their current name and get a notice. |
+| `protocol` | `number` | The client's protocol version (`PROTOCOL_VERSION`, option name `JOIN_PROTOCOL`). `3` or higher: client events arrive batched as one `events` message per tick. Missing or lower: one `event` message per event. |
 | `ephemeral` | `boolean` | When `true`, a newly created player is a test player: no "joined" feed message, and it is deleted when its connection leaves and whenever the room starts. `gaime smoke` and `gaime load` use it. |
 
 ---
@@ -312,19 +396,33 @@ These are served by the game process (`createGameServer`). Every response has `C
 
 | Method and path | Auth | Response |
 | --- | --- | --- |
-| `GET /health` | none | `{ ok, game, version, error, uptime }`. `ok` is false while a code error is recorded. `version` is the loaded code version. `uptime` is in seconds. The supervisor and the Docker health check use it. |
+| `GET /health` | none | `{ ok, game, version, error, disabled?, uptime }`. `ok` is false while a code error is recorded (the game is paused by an error in game code). `version` is the loaded code version. `disabled` (only present when non-empty) maps module ids switched off after an error to the error message; it is cleared by the next code load and does not make `ok` false. `uptime` is in seconds. The supervisor and the Docker health check use it. |
 | `GET /gaime/room` | none | `{ roomId }` of the single shared room. The room is created on demand. On failure it returns `503` with `Retry-After: 2`. |
-| `GET /gaime/stats` | none | Over a 10 s window: `{ clients, tickRate, tickMs, publishMs, patchBytes, eventLoopDelayMs, memoryMb, workers }`. `tickRate` is the game's ticks per second. `tickMs`, `publishMs` and `patchBytes` are `{ avg, max }`. `eventLoopDelayMs` is `{ p50, p99, max }`, the worst of the last complete 10 s window and the current one. Reading is non-destructive, so several readers see the same numbers. `workers` is `PoolStats[]`. See [SERVER.md](../SERVER.md#http). |
+| `GET /gaime/stats` | none | Over a 10 s window: `{ clients, tickRate, tickMs, publishMs, patchBytes, eventLoopDelayMs, droppedMs, engine, parts, memoryMb, workers }` (table below). Reading is non-destructive, so several readers see the same numbers. See [SERVER.md](../SERVER.md#http). |
 | `GET\|POST /gaime/admin/:action` | `Authorization: Bearer <token>` | Operator API used by the `gaime` CLI. The POST body is JSON (max 256 kB). A wrong token gets `401`. Errors get `400 { error }`. The nginx gateway answers `404` for `/gaime/admin/` from outside. |
 | everything from `routes(app)` | yours | Game-defined routes. |
 | `/`, `/index.html`, `/assets/*`, static files | none | Production only: `dist/client`. `index.html` is `no-store`, `/assets` is immutable for one year, other files are cached for 5 min. |
+
+`/gaime/stats` fields:
+
+| Field | Meaning |
+| --- | --- |
+| `clients` | connected clients |
+| `tickRate` | the game's ticks per second |
+| `tickMs`, `publishMs`, `patchBytes` | `{ avg, max }` over 10 s: time of one room tick (all engine steps it ran), of one publish, and the largest patch of a publish |
+| `eventLoopDelayMs` | `{ p50, p99, max }`, the worst of the last complete 10 s window and the current one |
+| `droppedMs` | simulated time dropped by the catch-up limit in the last 10 s; above 0 means the server could not keep up |
+| `engine` | `{ events, timers, deferredTimers, timersPending, droppedEvents }`: events dispatched and timers fired since the last code load, ticks that hit the timer limit, live timers now, client events dropped by the per-client cap since the room started |
+| `parts` | up to 15 entries `{ name, msPerSecond, callsPerSecond, maxMs }`, most expensive first, from the last complete 10 s window. Names: `game/step`, `<owner>/<system id>` for systems, `<owner> on <event>` for handlers, `<owner> command <type>` for commands (owner = `game` or a module id). Modifiers are counted inside the code that called `modify`. |
+| `memoryMb` | resident memory of the process |
+| `workers` | `PoolStats[]` of the worker pools |
 
 Admin actions (`admin()` in `packages/core/src/server/room.ts`):
 
 | Action | Body | Result |
 | --- | --- | --- |
 | `players` | none | `[{ id, name, online, host }]` |
-| `world` | none | The full world projection, **including `hidden` keys**, rounded like the network copy. |
+| `world` | none | The full world projection, **including `hidden` keys and the timer queue (`schedule`)**, rounded like the network copy. |
 | `say` | `{ text }` | Feed announcement `📣 <text>` (280 characters max). Returns `{ ok: true }`. |
 | `kick` | `{ player }` (id or name) | Removes the player. Returns `{ removed: <name> }`. |
 | `pause` | none | Pauses the simulation (`reason: 'host'`). Returns `{ paused: true }`. |

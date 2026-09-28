@@ -22,6 +22,9 @@ export function templates(root) {
   });
 }
 
+const pascal = name => name.split('-').map(part => part[0].toUpperCase() + part.slice(1)).join('');
+const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 export function newGame({ root, name, title, from = 'blank' }) {
   if (!/^[a-z][a-z0-9-]{1,40}$/.test(name)) throw new Error('Game name: lowercase letters, digits and dashes, e.g. "super-popes".');
   const source = join(root, 'games', from);
@@ -38,6 +41,9 @@ export function newGame({ root, name, title, from = 'blank' }) {
     text = text.replaceAll(`'${from}'`, `'${name}'`).replaceAll(`"name": "${from}"`, `"name": "${name}"`).replaceAll(`games/${from}`, `games/${name}`);
     // Only visible title text (<title>, headings), never identifiers such as `hurtCrystal`.
     if (oldTitle && /\.(html|ts)$/.test(file)) text = text.replaceAll(`>${oldTitle}<`, `>${display}<`).replaceAll(`title: '${oldTitle}'`, `title: '${display.replace(/'/g, "\\'")}'`);
+    // The registry type (`BlankRegistry` → `HiveRegistry`) and doc headings (`# Blank (games/hive)`).
+    if (/\.ts$/.test(file)) text = text.replaceAll(`${pascal(from)}Registry`, `${pascal(name)}Registry`);
+    if (oldTitle && /\.md$/.test(file)) text = text.replace(new RegExp(`^(#+ .*)\\b${escape(oldTitle)}\\b`, 'gm'), `$1${display}`);
     if (text !== before) writeFileSync(file, text);
   }
   return { path: relative(root, target), title: display };

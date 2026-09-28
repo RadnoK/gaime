@@ -1,18 +1,20 @@
 # Client
 
-The browser side of a gaime game: the connection to the room, the HUD, input, the Three.js scene, models, effects, camera and sound. The server is described in [SERVER.md](SERVER.md), the wire protocol in [PROTOCOL.md](PROTOCOL.md), the gameplay helpers shared with the server in [KIT.md](KIT.md), and how the pieces fit together in [ARCHITECTURE.md](ARCHITECTURE.md).
+The browser side of a gaime game: the connection to the room, input, and optional helpers for the HUD, the Three.js scene, models, effects, camera and sound. The server is described in [SERVER.md](SERVER.md) and [SIMULATION.md](SIMULATION.md), the wire protocol in [PROTOCOL.md](PROTOCOL.md), the gameplay helpers shared with the server in [KIT.md](KIT.md), and how the pieces fit together in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+**What players see is the game's own design.** The framework's job on the client is the connection (`GameClient`: identity, patches, commands, events, reconnection) and hot-reload safety (`Scope`, `keep`). `GameUi`, `@gaime/core/three` and `@gaime/core/audio` are **optional, replaceable defaults** — a quick way to get a lobby, chat and a 3D view while the game's real interface does not exist yet. A game can restyle them, use only some of them, or replace all of them with its own DOM, canvas, 2D renderer, engine or UI framework; nothing on the server depends on them.
 
 ## Overview
 
 | Import | Contents |
 | --- | --- |
-| `@gaime/core/client` | `GameClient`, `watchVersion`, `Keyboard`, `Pointer`, `isTyping`, `Controls`, `TouchControls`, `WASD`, `PAD_BUTTONS`, `ServerClock`, `Interpolator`, `Scope`, `keep`, `createFeatureModules` |
-| `@gaime/core/three` | `createStage`, `disposeObject`, `pickGround`, `ModelLibrary`, `loadGltf`, `createLabel`, `setLabel`, `EntityLayer`, `disposeOwned`, `CameraRig`, `CAMERA`, `createBar`, `setBar`, `faceCamera`, `EffectsLayer`, `builtinEffects` |
-| `@gaime/core/ui` | `GameUi`, `Lobby`, `Toasts`, `ChatBox`, `Roster`, `Banner`, `Dialog`, `StatusPill`, `h`, `escapeHtml`, `Writer`, `meter` (importing it also loads `ui.css`) |
-| `@gaime/core/audio` | `SoundBank`, `tones` |
+| `@gaime/core/client` (the part every game needs) | `GameClient`, `watchVersion`, `Keyboard`, `Pointer`, `isTyping`, `Controls`, `TouchControls`, `WASD`, `PAD_BUTTONS`, `ServerClock`, `Interpolator`, `Scope`, `keep`, `createFeatureModules` |
+| `@gaime/core/three` (optional) | `createStage`, `disposeObject`, `pickGround`, `ModelLibrary`, `loadGltf`, `createLabel`, `setLabel`, `EntityLayer`, `disposeOwned`, `CameraRig`, `CAMERA`, `createBar`, `setBar`, `faceCamera`, `EffectsLayer`, `builtinEffects` |
+| `@gaime/core/ui` (optional) | `GameUi`, `Lobby`, `Toasts`, `ChatBox`, `Roster`, `Banner`, `Dialog`, `StatusPill`, `h`, `escapeHtml`, `Writer`, `meter` (importing it also loads `ui.css`) |
+| `@gaime/core/audio` (optional) | `SoundBank`, `tones` |
 | `@gaime/core` | shared types (`BaseWorld`, `BasePlayer`, `Visual`, `Welcome`, …) and math (`dist`, `damp`, `wrapAngle`, …) |
 
-A game client is usually four files:
+The example games' clients are usually four files:
 
 ```text
 src/client/main.ts    wiring: GameClient, Scope, scene, HUD, controls, sounds, HMR
@@ -25,21 +27,22 @@ The data flow is one-way. The server sends a full snapshot (`welcome`) and then 
 
 ## A minimal `main.ts`
 
-This is `games/blank/src/client/main.ts`, the smallest complete client:
+This is `games/blank/src/client/main.ts`, the smallest complete client. It uses the optional defaults (`GameUi`, a Three.js `Scene`, `SoundBank`); the parts every client needs regardless of its look are `GameClient` kept with `keep`, the `Scope`, the event and world listeners, `net.input` and the HMR block.
 
 ```ts
 // ui.css first, so the game's --g-* overrides in style.css win.
 import { GameUi, h } from '@gaime/core/ui';
 import './style.css';
 import { Controls, GameClient, keep, Scope, TouchControls, WASD, watchVersion } from '@gaime/core/client';
-import type { Command, Input, Player, World } from '../shared/types';
+import { SoundBank, tones } from '@gaime/core/audio';
+import type { Command, Events, Input, Player, World } from '../shared/types';
 import { Scene } from './scene';
 
 const app = document.getElementById('app')!;
 const scope = new Scope();
 
 // One connection for the whole page life; hot reloads of this module keep it.
-const net = keep(import.meta.hot, 'net', () => new GameClient<World, Input, Command>({ game: 'blank' }));
+const net = keep(import.meta.hot, 'net', () => new GameClient<World, Input, Command, Events>({ game: 'blank' }));
 net.off();
 
 const surface = h('div', { class: 'stage' });
@@ -60,6 +63,10 @@ const ui = scope.add(new GameUi<World>({
 }));
 const score = h('b', {}, '0');
 ui.top.append(h('div', {}, h('span', { class: 'g-micro' }, 'SCORE '), score));
+
+// Server bus events listed in `network.events` arrive here (batched per tick).
+const sounds = scope.add(new SoundBank({ sounds: { collect: tones([[880, 0.05], [1320, 0.08]]) } }));
+scope.add(net.onEvent('pickup.collected', ({ playerId }) => { if (playerId === net.id) sounds.play('collect'); }));
 
 scope.add(net.on('welcome', welcome => { scene.meId = welcome.id; }));
 scope.add(net.on('world', world => {
@@ -89,10 +96,10 @@ if (import.meta.hot) {
 ## GameClient
 
 ```ts
-new GameClient<W extends BaseWorld, I = unknown, C extends { type: string } = { type: string }>(options: GameClientOptions)
+new GameClient<W extends BaseWorld, I = unknown, C extends { type: string } = { type: string }, E = Record<string, any>>(options: GameClientOptions)
 ```
 
-`W` is the world type, `I` the continuous input and `C` the union of game commands.
+`W` is the world type, `I` the continuous input, `C` the union of game commands and `E` the game's `Events` (types `onEvent`).
 
 ### Options
 
@@ -119,10 +126,11 @@ new GameClient<W extends BaseWorld, I = unknown, C extends { type: string } = { 
 | `savedName: string` | The name of the last `join` in this tab (`sessionStorage`). `GameUi` uses it to rejoin after a page reload without showing the lobby. It is cleared by `leave()`, `removed` and `replaced`. |
 | `lastName: string` | The last name used in this browser (`localStorage`), used to prefill the lobby. Both names follow a rename on the server (`/nick`), so a later rejoin sends the current name. |
 | `on(event, listener): () => void` | Subscribe. Returns an unsubscribe function (pass it to `scope.add`). |
+| `onEvent(name, listener): () => void` | Subscribe to one server event by name; with the fourth type parameter (`GameClient<World, Input, Command, Events>`) the payload is typed from the game's `Events`. Returns an unsubscribe function. |
 | `off()` | Remove every listener of every event. Used after a hot reload (see below). |
 | `join(name): Promise<void>` | Trims the name to 24 characters, stores it and connects. It reuses the tab's reconnection token when one exists, and otherwise joins the shared room with `{ name, ticket }`. |
 | `input(input: I)` | Continuous input (movement, aim), see [Input and commands](#input-and-commands). |
-| `command(command: C \| EngineCommand): boolean` | A discrete action. Returns `false` (and sends nothing) when not connected. |
+| `command(command: C \| EngineCommand \| { type: '<module>-<action>', … }): boolean` | A discrete action. Module commands (`<module>-<action>`) are accepted without being part of the game's `Command` type. Returns `false` (and sends nothing) when not connected. |
 | `chat(text): boolean` | Same as `command({ type: '$chat', text })`. Slash commands such as `/help` go through here too. |
 | `request<T>(name, payload?, timeout = 5000): Promise<T>` | RPC to `GameDefinition.requests[name]`. |
 | `leave(): Promise<void>` | Leave on purpose. The character stays in the world unless the game frees seats (`keepPlayers: false`). The state becomes `idle` and no reconnection happens. |
@@ -136,9 +144,16 @@ new GameClient<W extends BaseWorld, I = unknown, C extends { type: string } = { 
 | `status` | `(state: ConnectionState, text: string) => void` | On every state change. `text` is a readable description or the error message. |
 | `notice` | `(text: string) => void` | A private server notice (for example, a rejected command), and also Colyseus room errors that carry text. |
 | `welcome` | `(welcome: Welcome) => void` | On every full snapshot: the first join, every reconnect, every resync and every server hot reload. `Welcome` is `{ id, game, version, protocol, revision, host }`. |
-| `event` | `(name: string, data: unknown) => void` | One-off server events from `ctx.emit(name, data)`, for example sounds and screen shakes. They are not stored in the world. |
+| `event` | `(name: string, data: unknown) => void` | One-off server events: `ctx.emit(name, data)`, and bus events the game lists in `network.events` (their payload is the bus payload, e.g. `Events['pickup.collected']`). For sounds, screen shakes, hit markers. They arrive batched — all events of one server tick in one message, delivered to your listener one by one in order — and are not stored in the world, so a client that joins later never sees them. At most 256 per tick reach one client. |
 
 `welcome` fires many times per session, so its handler must be idempotent (assign `scene.meId = welcome.id` rather than creating objects).
+
+Type the payloads of forwarded events with the game's `Events` type from `src/shared/types.ts` — the client may import it, since `shared` is common to both sides — and subscribe by name:
+
+```ts
+const net = keep(import.meta.hot, 'net', () => new GameClient<World, Input, Command, Events>({ game: 'blank' }));
+scope.add(net.onEvent('pickup.collected', ({ playerId }) => { if (playerId === net.id) sounds.play('collect'); }));
+```
 
 ```ts
 // games/starter/src/client/main.ts
@@ -251,7 +266,7 @@ A production build cannot hot-reload. `watchVersion` polls `/health` every `inte
 
 ## HUD: GameUi
 
-`GameUi` is the standard multiplayer HUD, wired to a `GameClient`. It provides the lobby, a connection status pill with ping, a ☰ menu, the roster, the feed with chat, toasts for notices, a centred banner and the F3 network panel. Your game adds its own widgets to three containers.
+`GameUi` is an optional default HUD, wired to a `GameClient`: a lobby, a connection status pill with ping, a ☰ menu, the roster, the feed with chat, toasts for notices, a centred banner and the F3 network panel. It is useful while prototyping and for development tools (chat commands like `/bot`, F3 stats); the look is themable (`--g-*` variables) and every component can be used alone or left out. A game with its own interface does not need it — `GameClient` exposes everything it shows (`world.feed`, `world.players`, `net.chat`, `net.stats`, `status` and `notice` events).
 
 ```ts
 // games/starter/src/client/hud.ts
@@ -458,6 +473,8 @@ for (let i = 1; i <= 9; i++) {
 ```
 
 ## Scene and rendering
+
+`@gaime/core/three` is an optional set of Three.js helpers the example games use. Any renderer works: the client only receives plain-JSON worlds, and `Visual` descriptors are just data your renderer interprets.
 
 ### Stage
 
@@ -856,6 +873,8 @@ if (kind === 'down') { arena.rig.shake(0.5); controls.rumble(0.8, 200); }
 ```
 
 ## Audio
+
+`SoundBank` is an optional default; any Web Audio code or library works with `net.on('event')`.
 
 ```ts
 new SoundBank(options: SoundBankOptions)

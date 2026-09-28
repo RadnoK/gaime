@@ -3,7 +3,7 @@ import { h } from '@gaime/core/ui';
 import './style.css';
 import { SoundBank, tones } from '@gaime/core/audio';
 import { Controls, GameClient, keep, Scope, TouchControls, WASD, watchVersion } from '@gaime/core/client';
-import type { Command, Input, World } from '../shared/types';
+import type { Command, Events, Input, World } from '../shared/types';
 import { RULES } from '../shared/rules';
 import { Hud } from './hud';
 import { Battlefield } from './scene';
@@ -33,11 +33,17 @@ const sounds = scope.add(new SoundBank({
 
 scope.add(net.on('welcome', welcome => { field.meId = welcome.id; }));
 scope.add(net.on('world', world => { field.update(world); hud.render(world); }));
+// Server bus events listed in `network.events` arrive here (batched per tick).
 scope.add(net.on('event', (name, data) => {
-  if (name !== 'sound') return;
-  const kind = (data as { kind: string }).kind;
-  sounds.play(kind);
-  if (kind === 'boom') { field.rig.shake(0.6); controls.rumble(0.7, 180); }
+  switch (name) {
+    case 'match.countdown': sounds.play('tick'); break;
+    case 'match.started': sounds.play('start'); break;
+    case 'match.ended': if ((data as Events['match.ended']).winner) sounds.play('win'); break;
+    case 'turn.started': if ((data as Events['turn.started']).player === net.id) sounds.play('tick'); break;
+    case 'shell.fired': sounds.play('fire'); break;
+    case 'shell.exploded': sounds.play('boom'); field.rig.shake(0.6); controls.rumble(0.7, 180); break;
+    case 'player.hit': if ((data as Events['player.hit']).player === net.id) controls.rumble(1, 260); break;
+  }
 }));
 if (net.world) { field.meId = net.id; field.update(net.world); hud.render(net.world); }
 
@@ -48,7 +54,8 @@ scope.add(field.stage.onFrame(dt => {
   const world = net.world;
   const me = world?.players[net.id];
   if (!world || !me) return;
-  const myTurn = world.match.phase === 'playing' && activeId(world) === me.id && !world.shotFired;
+  const active = world.match.phase === 'playing' && activeId(world) === me.id;
+  const myTurn = active && world.turnPhase === 'aim';
   const axis = hud.typing ? { x: 0, y: 0 } : controls.axis('move');
   // Our aim is predicted locally while it is our turn; otherwise follow the server.
   if (!myTurn || aim === undefined) aim = me.aim;
@@ -56,7 +63,7 @@ scope.add(field.stage.onFrame(dt => {
   const towardsLeft = aim > 90;
   if (myTurn) aim = Math.max(0, Math.min(180, aim + axis.y * RULES.aimSpeed * dt * (towardsLeft ? -1 : 1)));
   field.localAim = myTurn ? aim : undefined;
-  net.input({ move: myTurn || world.retreatUntil > world.time ? axis.x : 0, aim });
+  net.input({ move: myTurn || (active && world.turnPhase === 'retreat') ? axis.x : 0, aim });
 
   // Hold to charge, release to fire; a full bar fires by itself.
   if (myTurn && controls.down('fire') && !hud.typing) charge = Math.min(1, charge + dt / RULES.chargeSeconds);
