@@ -75,11 +75,7 @@ Then follow [TUTORIAL.md](TUTORIAL.md) (builds "Tag" from blank step by step) or
 
 ## 5. Put it online
 
-Once, on a VPS with Docker and a domain:
-
-```sh
-sudo bash deploy/install.sh hive hive.example.com git@github.com:org/repo.git --proxy caddy
-```
+Follow [QUICK_DEPLOY.md](QUICK_DEPLOY.md) to invite the team, prepare a Docker VPS, install the game, and check its public URL. It covers public and private GitHub repositories and works with a real domain or a trial `sslip.io` address.
 
 From then on `git push` to `main` is the deploy: the server picks the commit up within seconds, typechecks it, hot-reloads it without kicking anyone, and reverts it by itself if it breaks. [DEPLOYMENT.md](DEPLOYMENT.md) covers modes, rollback and operations. Without a server: `cd games/hive && npx gaime host` runs the same supervisor on your laptop (share it over LAN/Tailscale).
 

@@ -8,6 +8,7 @@
 | [TUTORIAL.md](TUTORIAL.md) | build a complete game ("Tag") from the blank template, step by step |
 | [TEMPLATES.md](TEMPLATES.md) | the example games (`blank`, `starter`, `duel`, `bumper`) and which one to start from |
 | [NEW_GAME.md](NEW_GAME.md) | creating a game, early design decisions, a starting prompt for your AI |
+| [QUICK_DEPLOY.md](QUICK_DEPLOY.md) | invite teammates, set up a VPS, install a game and deploy later changes |
 
 ## The core guide
 

@@ -1,5 +1,7 @@
 # Deploys, hot updates, rollback
 
+For the shortest path from GitHub invitations to a live game, follow [Put a game online with a team](QUICK_DEPLOY.md).
+
 Every game has one **supervisor** (`gaime host`, code in `packages/host`). Every `GAIME_POLL_MS` (3 s) the supervisor runs `git fetch` for `main` and deploys each new commit. The author's machine takes no part in a deploy: `git push` is enough.
 
 ## Modes
@@ -102,15 +104,17 @@ Serverless and scale-to-zero platforms (Vercel, Cloudflare Workers, Lambda, free
 
 ## A VPS with Docker (recommended)
 
-Once, on a server with Docker and a domain pointing at it:
+For a server with Docker and a domain pointing at it:
 
 ```sh
-git clone <repo> /tmp/gaime && sudo bash /tmp/gaime/deploy/install.sh starter game.example.com git@github.com:org/repo.git \
-  --mode live --proxy traefik        # or --proxy caddy (own HTTPS) / none (your own proxy on 127.0.0.1:8080)
-  # --password                       # shared password for players (login: player)
+scp deploy/install.sh root@SERVER_IP:/root/install.sh
+ssh -tt root@SERVER_IP \
+  'bash /root/install.sh starter game.example.com https://github.com/org/repo.git --mode live --proxy caddy'
 ```
 
-The script creates `/srv/gaime/<game>/`, generates a deploy key (it prints it — add it as a **read-only Deploy key** of the repository), clones the repo, writes `.env`, copies the Compose and gateway files, sets up hourly checkpoint backups (systemd) and runs `docker compose up -d`.
+Run these from a local checkout of a **public** repository; the domain's A record must point at the VPS, and Caddy needs ports 80 and 443. For a private repository, use its SSH URL and follow the interactive deploy-key step in [QUICK_DEPLOY.md](QUICK_DEPLOY.md#2-install-the-game-on-the-vps). Other options: `--proxy traefik` for an existing Traefik network, `--proxy none` for your own proxy on `127.0.0.1:8080`, and `--password` for shared player login (`player`).
+
+The script creates `/srv/gaime/<game>/`, clones the repo, writes `.env`, copies the Compose and gateway files, sets up hourly checkpoint backups (systemd) and runs `docker compose up -d`. With an SSH repository URL, it also generates a deploy key (it prints the public half — add it as a **read-only Deploy key** of the repository).
 
 ```text
 /srv/gaime/<game>/
@@ -128,7 +132,7 @@ The script creates `/srv/gaime/<game>/`, generates a deploy key (it prints it �
 
 Containers: **game** (`node:24-bookworm`, UID 1000, runs the supervisor from `repo/`) and **gateway** (nginx: keeps the page up while the game restarts, proxies WebSockets and HMR, answers 503 + `Retry-After` while the game starts, blocks `/gaime/admin` from outside). With `compose.traefik.yml` the gateway joins the `edge` network of an existing Traefik; with `compose.caddy.yml` a dedicated Caddy serves HTTPS on 80/443.
 
-Several games on one server: each has its own directory, Compose project (`gaime-<game>`), supervisor and domain; `install.sh` assigns consecutive local gateway ports.
+Several games on one server: each has its own directory, Compose project (`gaime-<game>`), supervisor and domain; `install.sh` assigns consecutive local gateway ports. Use a shared proxy such as Traefik for several games: separate Caddy instances would both try to bind ports 80 and 443.
 
 ### Operations
 
